@@ -52,7 +52,7 @@ except ImportError:  # python-dotenv is optional if the user exports env vars
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DATASET_DIR   = Path(__file__).parent / "dataset"
-EMBED_MODEL   = "models/text-embedding-004"  # Gemini embedding model
+EMBED_MODEL   = "models/text-embedding-001"  # Gemini embedding model
 EMBED_DIM     = 384   # matches pgvector column; Gemini supports output_dimensionality
 
 TOP_K_DENSE   = 8    # candidates from pgvector
