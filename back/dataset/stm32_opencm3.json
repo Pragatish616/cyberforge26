@@ -1,0 +1,146 @@
+[
+  {
+    "title": "STM32F4 USART Transmit (libopencm3) — part 1/2",
+    "description": "Configures USART2 on the STM32F4-Discovery at 115200 baud and sends characters in a polling loop using libopencm3.",
+    "code": "/*\n * This file is part of the libopencm3 project.\n *\n * Copyright (C) 2009 Uwe Hermann <uwe@hermann-uwe.de>\n * Copyright (C) 2011 Stephen Caudle <scaudle@doceme.com>\n *\n * This library is free software: you can redistribute it and/or modify\n * it under the terms of the GNU Lesser General Public License as published by\n * the Free Software Foundation, either version 3 of the License, or\n * (at your option) any later version.\n *\n * This library is distributed in the hope that it will be useful,\n * but WITHOUT ANY WARRANTY; without even the implied warranty of\n * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n * GNU Lesser General Public License for more details.\n *\n * You should have received a copy of the GNU Lesser General Public License\n * along with this library.  If not, see <http://www.gnu.org/licenses/>.\n */\n\n#include <libopencm3/stm32/rcc.h>\n#include <libopencm3/stm32/gpio.h>\n#include <libopencm3/stm32/usart.h>\n\nstatic void clock_setup(void)\n{\n\t/* Enable GPIOD clock for LED & USARTs. */\n\trcc_periph_clock_enable(RCC_GPIOD);\n\trcc_periph_clock_enable(RCC_GPIOA);\n\n\t/* Enable clocks for USART2. */\n\trcc_periph_clock_enable(RCC_USART2);\n}\n\nstatic void usart_setup(void)\n{\n\t/* Setup USART2 parameters. */\n\tusart_set_baudrate(USART2, 115200);\n\tusart_set_databits(USART2, 8);\n\tusart_set_stopbits(USART2, USART_STOPBITS_1);\n\tusart_set_mode(USART2, USART_MODE_TX);\n\tusart_set_parity(USART2, USART_PARITY_NONE);\n\tusart_set_flow_control(USART2, USART_FLOWCONTROL_NONE);\n\n\t/* Finally enable the USART. */\n\tusart_enable(USART2);\n}\n\nstatic void gpio_setup(void)\n{\n\t/* Setup GPIO pin GPIO12 on GPIO port D for LED. */\n\tgpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO12);\n\n\t/* Setup GPIO pins for USART2 transmit. */\n\tgpio_mode_setup(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO2);\n\n\t/* Setup USART2 TX pin as alternate function. */\n\tgpio_set_af(GPIOA, GPIO_AF7, GPIO2);\n}",
+    "tags": [
+      "stm32",
+      "stm32f4",
+      "usart",
+      "uart",
+      "serial",
+      "libopencm3",
+      "polling",
+      "gpio"
+    ]
+  },
+  {
+    "title": "STM32F4 USART Transmit (libopencm3) — part 2/2",
+    "description": "(continued) /* Setup GPIO pin GPIO12 on GPIO port D for LED. */",
+    "code": "/* Setup GPIO pin GPIO12 on GPIO port D for LED. */\n\tgpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO12);\n\n\t/* Setup GPIO pins for USART2 transmit. */\n\tgpio_mode_setup(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO2);\n\n\t/* Setup USART2 TX pin as alternate function. */\n\tgpio_set_af(GPIOA, GPIO_AF7, GPIO2);\n}\n\nint main(void)\n{\n\tint i, j = 0, c = 0;\n\n\tclock_setup();\n\tgpio_setup();\n\tusart_setup();\n\n\t/* Blink the LED (PD12) on the board with every transmitted byte. */\n\twhile (1) {\n\t\tgpio_toggle(GPIOD, GPIO12);\t/* LED on/off */\n\t\tusart_send_blocking(USART2, c + '0'); /* USART2: Send byte. */\n\t\tc = (c == 9) ? 0 : c + 1;\t/* Increment c. */\n\t\tif ((j++ % 80) == 0) {\t\t/* Newline after line full. */\n\t\t\tusart_send_blocking(USART2, '\\r');\n\t\t\tusart_send_blocking(USART2, '\\n');\n\t\t}\n\t\tfor (i = 0; i < 3000000; i++) {\t/* Wait a bit. */\n\t\t\t__asm__(\"NOP\");\n\t\t}\n\t}\n\n\treturn 0;\n}",
+    "tags": [
+      "stm32",
+      "stm32f4",
+      "usart",
+      "uart",
+      "serial",
+      "libopencm3",
+      "polling",
+      "gpio"
+    ]
+  },
+  {
+    "title": "STM32F4 Timer PWM Output (libopencm3) — part 1/4",
+    "description": "Sets up TIM3 on the STM32F4-Discovery to generate a PWM signal with configurable frequency and duty cycle.",
+    "code": "/*\n * This file is part of the libopencm3 project.\n *\n * Copyright (C) 2015 Piotr Esden-Tempski <piotr@esden.net>\n * Copyright (C) 2015 Jack Ziesing <jziesing@gmail.com>\n *\n * This library is free software: you can redistribute it and/or modify\n * it under the terms of the GNU Lesser General Public License as published by\n * the Free Software Foundation, either version 3 of the License, or\n * (at your option) any later version.\n *\n * This library is distributed in the hope that it will be useful,\n * but WITHOUT ANY WARRANTY; without even the implied warranty of\n * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n * GNU Lesser General Public License for more details.\n *\n * You should have received a copy of the GNU Lesser General Public License\n * along with this library.  If not, see <http://www.gnu.org/licenses/>.\n */\n\n#include <libopencm3/cm3/nvic.h>\n#include <libopencm3/stm32/rcc.h>\n#include <libopencm3/stm32/gpio.h>\n#include <libopencm3/stm32/timer.h>\n\n#ifndef ARRAY_LEN\n#define ARRAY_LEN(array) (sizeof((array))/sizeof((array)[0]))\n#endif\n\n#define LED1_PORT GPIOD\n#define LED1_PIN GPIO12\n\n/* Morse standard timings */\n#define ELEMENT_TIME 500\n#define DIT (1*ELEMENT_TIME)\n#define DAH (3*ELEMENT_TIME)\n#define INTRA (1*ELEMENT_TIME)\n#define INTER (3*ELEMENT_TIME)\n#define WORD (7*ELEMENT_TIME)\n\nuint16_t frequency_sequence[] = {\n\tDIT,\n\tINTRA,\n\tDIT,\n\tINTRA,\n\tDIT,\n\tINTER,\n\tDAH,\n\tINTRA,\n\tDAH,\n\tINTRA,\n\tDAH,\n\tINTER,\n\tDIT,\n\tINTRA,\n\tDIT,\n\tINTRA,\n\tDIT,\n\tWORD,\n};",
+    "tags": [
+      "stm32",
+      "stm32f4",
+      "timer",
+      "pwm",
+      "tim3",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  },
+  {
+    "title": "STM32F4 Timer PWM Output (libopencm3) — part 2/4",
+    "description": "(continued) INTRA,",
+    "code": "INTRA,\n\tDAH,\n\tINTER,\n\tDIT,\n\tINTRA,\n\tDIT,\n\tINTRA,\n\tDIT,\n\tWORD,\n};\n\nint frequency_sel = 0;\n\nstatic void clock_setup(void)\n{\n\trcc_clock_setup_pll(&rcc_hse_8mhz_3v3[RCC_CLOCK_3V3_168MHZ]);\n}\n\nstatic void gpio_setup(void)\n{\n\t/* Enable GPIO clock for leds. */\n\trcc_periph_clock_enable(RCC_GPIOD);\n\n\t/* Enable led as output */\n\tgpio_mode_setup(LED1_PORT, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, LED1_PIN);\n\tgpio_set(LED1_PORT, LED1_PIN);\n}\n\nstatic void tim_setup(void)\n{\n\t/* Enable TIM2 clock. */\n\trcc_periph_clock_enable(RCC_TIM2);\n\n\t/* Enable TIM2 interrupt. */\n\tnvic_enable_irq(NVIC_TIM2_IRQ);\n\n\t/* Reset TIM2 peripheral to defaults. */\n\trcc_periph_reset_pulse(RST_TIM2);\n\n\t/* Timer global mode:\n\t * - No divider\n\t * - Alignment edge\n\t * - Direction up\n\t * (These are actually default values after reset above, so this call\n\t * is strictly unnecessary, but demos the api for alternative settings)\n\t */\n\ttimer_set_mode(TIM2, TIM_CR1_CKD_CK_INT,\n\t\tTIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);\n\n\t/*\n\t * Please take note that the clock source for STM32 timers\n\t * might not be the raw APB1/APB2 clocks.  In various conditions they\n\t * are doubled.  See the Reference Manual for full details!\n\t * In our case, TIM2 on APB1 is running at double frequency, so this\n\t * sets the prescaler to have the timer run at 5kHz\n\t */\n\ttimer_set_prescaler(TIM2, ((rcc_apb1_frequency * 2) / 5000));\n\n\t/* Disable preload. */\n\ttimer_disable_preload(TIM2);",
+    "tags": [
+      "stm32",
+      "stm32f4",
+      "timer",
+      "pwm",
+      "tim3",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  },
+  {
+    "title": "STM32F4 Timer PWM Output (libopencm3) — part 3/4",
+    "description": "(continued) * Please take note that the clock source for STM32 timers",
+    "code": "* Please take note that the clock source for STM32 timers\n\t * might not be the raw APB1/APB2 clocks.  In various conditions they\n\t * are doubled.  See the Reference Manual for full details!\n\t * In our case, TIM2 on APB1 is running at double frequency, so this\n\t * sets the prescaler to have the timer run at 5kHz\n\t */\n\ttimer_set_prescaler(TIM2, ((rcc_apb1_frequency * 2) / 5000));\n\n\t/* Disable preload. */\n\ttimer_disable_preload(TIM2);\n\ttimer_continuous_mode(TIM2);\n\n\t/* count full range, as we'll update compare value continuously */\n\ttimer_set_period(TIM2, 65535);\n\n\t/* Set the initual output compare value for OC1. */\n\ttimer_set_oc_value(TIM2, TIM_OC1, frequency_sequence[frequency_sel++]);\n\n\t/* Counter enable. */\n\ttimer_enable_counter(TIM2);\n\n\t/* Enable Channel 1 compare interrupt to recalculate compare values */\n\ttimer_enable_irq(TIM2, TIM_DIER_CC1IE);\n}\n\nvoid tim2_isr(void)\n{\n\tif (timer_get_flag(TIM2, TIM_SR_CC1IF)) {\n\n\t\t/* Clear compare interrupt flag. */\n\t\ttimer_clear_flag(TIM2, TIM_SR_CC1IF);\n\n\t\t/*\n\t\t * Get current timer value to calculate next\n\t\t * compare register value.\n\t\t */\n\t\tuint16_t compare_time = timer_get_counter(TIM2);\n\n\t\t/* Calculate and set the next compare value. */\n\t\tuint16_t frequency = frequency_sequence[frequency_sel++];\n\t\tuint16_t new_time = compare_time + frequency;\n\n\t\ttimer_set_oc_value(TIM2, TIM_OC1, new_time);\n\t\tif (frequency_sel == ARRAY_LEN(frequency_sequence)) {\n\t\t\tfrequency_sel = 0;\n\t\t}\n\n\t\t/* Toggle LED to indicate compare event. */\n\t\tgpio_toggle(LED1_PORT, LED1_PIN);\n\t}\n}\n\nint main(void)\n{\n\tclock_setup();\n\tgpio_setup();\n\ttim_setup();\n\n\twhile (1) {\n\t\t;",
+    "tags": [
+      "stm32",
+      "stm32f4",
+      "timer",
+      "pwm",
+      "tim3",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  },
+  {
+    "title": "STM32F4 Timer PWM Output (libopencm3) — part 4/4",
+    "description": "(continued) }",
+    "code": "}\n\nint main(void)\n{\n\tclock_setup();\n\tgpio_setup();\n\ttim_setup();\n\n\twhile (1) {\n\t\t;\n\t}\n\n\treturn 0;\n}",
+    "tags": [
+      "stm32",
+      "stm32f4",
+      "timer",
+      "pwm",
+      "tim3",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  },
+  {
+    "title": "STM32F1 USART Interrupt-Driven RX — part 1/3",
+    "description": "Implements interrupt-driven UART reception on STM32F103 using the USART IRQ handler and a ring buffer.",
+    "code": "/*\n * This file is part of the libopencm3 project.\n *\n * Copyright (C) 2009 Uwe Hermann <uwe@hermann-uwe.de>\n *\n * This library is free software: you can redistribute it and/or modify\n * it under the terms of the GNU Lesser General Public License as published by\n * the Free Software Foundation, either version 3 of the License, or\n * (at your option) any later version.\n *\n * This library is distributed in the hope that it will be useful,\n * but WITHOUT ANY WARRANTY; without even the implied warranty of\n * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n * GNU Lesser General Public License for more details.\n *\n * You should have received a copy of the GNU Lesser General Public License\n * along with this library.  If not, see <http://www.gnu.org/licenses/>.\n */\n\n#include <libopencm3/stm32/rcc.h>\n#include <libopencm3/stm32/gpio.h>\n#include <libopencm3/stm32/usart.h>\n#include <libopencm3/cm3/nvic.h>\n\nstatic void clock_setup(void)\n{\n\trcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);\n\n\t/* Enable GPIOA clock (for LED GPIOs). */\n\trcc_periph_clock_enable(RCC_GPIOC);\n\n\t/* Enable clocks for GPIO port A (for GPIO_USART1_TX) and USART1. */\n\trcc_periph_clock_enable(RCC_GPIOA);\n\trcc_periph_clock_enable(RCC_AFIO);\n\trcc_periph_clock_enable(RCC_USART1);\n}\n\nstatic void usart_setup(void)\n{\n\t/* Enable the USART1 interrupt. */\n\tnvic_enable_irq(NVIC_USART1_IRQ);\n\n\t/* Setup GPIO pin GPIO_USART1_RE_TX on GPIO port B for transmit. */\n\tgpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ,\n\t\t      GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO_USART1_TX);\n\n\t/* Setup GPIO pin GPIO_USART1_RE_RX on GPIO port B for receive. */\n\tgpio_set_mode(GPIOA, GPIO_MODE_INPUT,\n\t\t      GPIO_CNF_INPUT_FLOAT, GPIO_USART1_RX);\n\n\t/* Setup UART parameters. */\n\tusart_set_baudrate(USART1, 115200);\n\tusart_set_databits(USART1, 8);\n\tusart_set_stopbits(USART1, USART_STOPBITS_1);\n\tusart_set_parity(USART1, USART_PARITY_NONE);\n\tusart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);\n\tusart_set_mode(USART1, USART_MODE_TX_RX);\n\n\t/* Enable USART1 Receive interrupt. */\n\tUSART_CR1(USART1) |= USART_CR1_RXNEIE;",
+    "tags": [
+      "stm32",
+      "stm32f1",
+      "usart",
+      "uart",
+      "interrupt",
+      "irq",
+      "rx",
+      "ring-buffer",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  },
+  {
+    "title": "STM32F1 USART Interrupt-Driven RX — part 2/3",
+    "description": "(continued) /* Setup UART parameters. */",
+    "code": "/* Setup UART parameters. */\n\tusart_set_baudrate(USART1, 115200);\n\tusart_set_databits(USART1, 8);\n\tusart_set_stopbits(USART1, USART_STOPBITS_1);\n\tusart_set_parity(USART1, USART_PARITY_NONE);\n\tusart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);\n\tusart_set_mode(USART1, USART_MODE_TX_RX);\n\n\t/* Enable USART1 Receive interrupt. */\n\tUSART_CR1(USART1) |= USART_CR1_RXNEIE;\n\n\t/* Finally enable the USART. */\n\tusart_enable(USART1);\n}\n\nstatic void gpio_setup(void)\n{\n\tgpio_set(GPIOC, GPIO12);\n\n\t/* Setup GPIO6 and 7 (in GPIO port A) for LED use. */\n\tgpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_50_MHZ,\n\t\t      GPIO_CNF_OUTPUT_PUSHPULL, GPIO12);\n}\n\nvoid usart1_isr(void)\n{\n\tstatic uint8_t data = 'A';\n\n\t/* Check if we were called because of RXNE. */\n\tif (((USART_CR1(USART1) & USART_CR1_RXNEIE) != 0) &&\n\t    ((USART_SR(USART1) & USART_SR_RXNE) != 0)) {\n\n\t\t/* Indicate that we got data. */\n\t\tgpio_toggle(GPIOC, GPIO12);\n\n\t\t/* Retrieve the data from the peripheral. */\n\t\tdata = usart_recv(USART1);\n\n\t\t/* Enable transmit interrupt so it sends back the data. */\n\t\tUSART_CR1(USART1) |= USART_CR1_TXEIE;\n\t}\n\n\t/* Check if we were called because of TXE. */\n\tif (((USART_CR1(USART1) & USART_CR1_TXEIE) != 0) &&\n\t    ((USART_SR(USART1) & USART_SR_TXE) != 0)) {\n\n\t\t/* Indicate that we are sending out data. */\n\t\t// gpio_toggle(GPIOA, GPIO7);\n\n\t\t/* Put data into the transmit register. */\n\t\tusart_send(USART1, data);\n\n\t\t/* Disable the TXE interrupt as we don't need it anymore. */\n\t\tUSART_CR1(USART1) &= ~USART_CR1_TXEIE;\n\t}\n}\n\nint main(void)\n{\n\tclock_setup();",
+    "tags": [
+      "stm32",
+      "stm32f1",
+      "usart",
+      "uart",
+      "interrupt",
+      "irq",
+      "rx",
+      "ring-buffer",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  },
+  {
+    "title": "STM32F1 USART Interrupt-Driven RX — part 3/3",
+    "description": "(continued) usart_send(USART1, data);",
+    "code": "usart_send(USART1, data);\n\n\t\t/* Disable the TXE interrupt as we don't need it anymore. */\n\t\tUSART_CR1(USART1) &= ~USART_CR1_TXEIE;\n\t}\n}\n\nint main(void)\n{\n\tclock_setup();\n\tgpio_setup();\n\tusart_setup();\n\n\t/* Wait forever and do nothing. */\n\twhile (1)\n\t\t__asm__(\"nop\");\n\n\treturn 0;\n}",
+    "tags": [
+      "stm32",
+      "stm32f1",
+      "usart",
+      "uart",
+      "interrupt",
+      "irq",
+      "rx",
+      "ring-buffer",
+      "libopencm3",
+      "gpio",
+      "nvic"
+    ]
+  }
+]

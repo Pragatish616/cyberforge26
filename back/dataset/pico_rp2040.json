@@ -1,0 +1,290 @@
+[
+  {
+    "title": "RP2040 Blink LED",
+    "description": "Toggles the onboard LED using GPIO 25 in a superloop with 1-second delay via Pico SDK sleep_ms.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n#include \"pico/stdlib.h\"\n\n// Pico W devices use a GPIO on the WIFI chip for the LED,\n// so when building for Pico W, CYW43_WL_GPIO_LED_PIN will be defined\n#ifdef CYW43_WL_GPIO_LED_PIN\n#include \"pico/cyw43_arch.h\"\n#endif\n\n#ifndef LED_DELAY_MS\n#define LED_DELAY_MS 250\n#endif\n\n// Perform initialisation\nint pico_led_init(void) {\n#if defined(PICO_DEFAULT_LED_PIN)\n    // A device like Pico that uses a GPIO for the LED will define PICO_DEFAULT_LED_PIN\n    // so we can use normal GPIO functionality to turn the led on and off\n    gpio_init(PICO_DEFAULT_LED_PIN);\n    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);\n    return PICO_OK;\n#elif defined(CYW43_WL_GPIO_LED_PIN)\n    // For Pico W devices we need to initialise the driver etc\n    return cyw43_arch_init();\n#endif\n}\n\n// Turn the led on or off\nvoid pico_set_led(bool led_on) {\n#if defined(PICO_DEFAULT_LED_PIN)\n    // Just set the GPIO on or off\n    gpio_put(PICO_DEFAULT_LED_PIN, led_on);\n#elif defined(CYW43_WL_GPIO_LED_PIN)\n    // Ask the wifi \"driver\" to set the GPIO on or off\n    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_on);\n#endif\n}\n\nint main() {\n    int rc = pico_led_init();\n    hard_assert(rc == PICO_OK);\n    while (true) {\n        pico_set_led(true);\n        sleep_ms(LED_DELAY_MS);\n        pico_set_led(false);\n        sleep_ms(LED_DELAY_MS);\n    }\n}\n",
+    "tags": [
+      "rp2040",
+      "pico",
+      "gpio",
+      "blink",
+      "led",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 UART Hello World",
+    "description": "Initialises UART0 at 115200 baud on GP0/GP1 and sends a hello string using Pico SDK uart_puts.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n\n#include <stdio.h>\n#include \"pico/stdlib.h\"\n#include \"hardware/uart.h\"\n\n/// \\tag::hello_uart[]\n\n#define UART_ID uart0\n#define BAUD_RATE 115200\n\n// We are using pins 0 and 1, but see the GPIO function select table in the\n// datasheet for information on which other pins can be used.\n#define UART_TX_PIN 0\n#define UART_RX_PIN 1\n\nint main() {\n    // Set up our UART with the required speed.\n    uart_init(UART_ID, BAUD_RATE);\n\n    // Set the TX and RX pins by using the function select on the GPIO\n    // Set datasheet for more information on function select\n    gpio_set_function(UART_TX_PIN, UART_FUNCSEL_NUM(UART_ID, UART_TX_PIN));\n    gpio_set_function(UART_RX_PIN, UART_FUNCSEL_NUM(UART_ID, UART_RX_PIN));\n\n    // Use some the various UART functions to send out data\n    // In a default system, printf will also output via the default UART\n\n    // Send out a character without any conversions\n    uart_putc_raw(UART_ID, 'A');\n\n    // Send out a character but do CR/LF conversions\n    uart_putc(UART_ID, 'B');\n\n    // Send out a string, with CR/LF conversions\n    uart_puts(UART_ID, \" Hello, UART!\\n\");\n    return 0;\n}\n\n/// \\end::hello_uart[]\n",
+    "tags": [
+      "rp2040",
+      "pico",
+      "uart",
+      "serial",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 I2C Bus Scanner — part 1/2",
+    "description": "Scans all 7-bit I2C addresses on I2C0 and prints discovered devices over UART for debugging.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n// Sweep through all 7-bit I2C addresses, to see if any slaves are present on\n// the I2C bus. Print out a table that looks like this:\n//\n// I2C Bus Scan\n//    0 1 2 3 4 5 6 7 8 9 A B C D E F\n// 00 . . . . . . . . . . . . . . . .\n// 10 . . @ . . . . . . . . . . . . .\n// 20 . . . . . . . . . . . . . . . .\n// 30 . . . . @ . . . . . . . . . . .\n// 40 . . . . . . . . . . . . . . . .\n// 50 . . . . . . . . . . . . . . . .\n// 60 . . . . . . . . . . . . . . . .\n// 70 . . . . . . . . . . . . . . . .\n// E.g. if addresses 0x12 and 0x34 were acknowledged.\n\n#include <stdio.h>\n#include \"pico/stdlib.h\"\n#include \"pico/binary_info.h\"\n#include \"hardware/i2c.h\"\n\n// I2C reserves some addresses for special purposes. We exclude these from the scan.\n// These are any addresses of the form 000 0xxx or 111 1xxx\nbool reserved_addr(uint8_t addr) {\n    return (addr & 0x78) == 0 || (addr & 0x78) == 0x78;\n}\n\nint main() {\n    // Enable UART so we can print status output\n    stdio_init_all();\n#if !defined(i2c_default) || !defined(PICO_DEFAULT_I2C_SDA_PIN) || !defined(PICO_DEFAULT_I2C_SCL_PIN)\n#warning i2c/bus_scan example requires a board with I2C pins\n    puts(\"Default I2C pins were not defined\");\n#else\n    // This example will use I2C0 on the default SDA and SCL pins (GP4, GP5 on a Pico)\n    i2c_init(i2c_default, 100 * 1000);\n    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);\n    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);\n    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);\n    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);\n    // Make the I2C pins available to picotool\n    bi_decl(bi_2pins_with_func(PICO_DEFAULT_I2C_SDA_PIN, PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C));\n\n    printf(\"\\nI2C Bus Scan\\n\");\n    printf(\"   0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F\\n\");\n\n    for (int addr = 0; addr < (1 << 7); ++addr) {\n        if (addr % 16 == 0) {\n            printf(\"%02x \", addr);\n        }\n\n        // Perform a 1-byte dummy read from the probe address. If a slave\n        // acknowledges this address, the function returns the number of bytes\n        // transferred. If the address byte is ignored, the function returns\n        // -1.",
+    "tags": [
+      "rp2040",
+      "pico",
+      "i2c",
+      "scanner",
+      "debug",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 I2C Bus Scanner — part 2/2",
+    "description": "(continued) for (int addr = 0; addr < (1 << 7); ++addr) {",
+    "code": "for (int addr = 0; addr < (1 << 7); ++addr) {\n        if (addr % 16 == 0) {\n            printf(\"%02x \", addr);\n        }\n\n        // Perform a 1-byte dummy read from the probe address. If a slave\n        // acknowledges this address, the function returns the number of bytes\n        // transferred. If the address byte is ignored, the function returns\n        // -1.\n\n        // Skip over any reserved addresses.\n        int ret;\n        uint8_t rxdata;\n        if (reserved_addr(addr))\n            ret = PICO_ERROR_GENERIC;\n        else\n            ret = i2c_read_blocking(i2c_default, addr, &rxdata, 1, false);\n\n        printf(ret < 0 ? \".\" : \"@\");\n        printf(addr % 16 == 15 ? \"\\n\" : \"  \");\n    }\n    printf(\"Done.\\n\");\n    return 0;\n#endif\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "i2c",
+      "scanner",
+      "debug",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 MPU6050 IMU over I2C — part 1/3",
+    "description": "Reads accelerometer and gyroscope data from an MPU6050 over I2C and prints calibrated values via UART.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n#include <stdio.h>\n#include <string.h>\n#include \"pico/stdlib.h\"\n#include \"pico/binary_info.h\"\n#include \"hardware/i2c.h\"\n\n/* Example code to talk to a MPU6050 MEMS accelerometer and gyroscope\n\n   This is taking to simple approach of simply reading registers. It's perfectly\n   possible to link up an interrupt line and set things up to read from the\n   inbuilt FIFO to make it more useful.\n\n   NOTE: Ensure the device is capable of being driven at 3.3v NOT 5v. The Pico\n   GPIO (and therefore I2C) cannot be used at 5v.\n\n   You will need to use a level shifter on the I2C lines if you want to run the\n   board at 5v.\n\n   Connections on Raspberry Pi Pico board, other boards may vary.\n\n   GPIO PICO_DEFAULT_I2C_SDA_PIN (On Pico this is GP4 (pin 6)) -> SDA on MPU6050 board\n   GPIO PICO_DEFAULT_I2C_SCL_PIN (On Pico this is GP5 (pin 7)) -> SCL on MPU6050 board\n   3.3v (pin 36) -> VCC on MPU6050 board\n   GND (pin 38)  -> GND on MPU6050 board\n*/\n\n// By default these devices  are on bus address 0x68\nstatic int addr = 0x68;\n\n#ifdef i2c_default\nstatic void mpu6050_reset() {\n    // Two byte reset. First byte register, second byte data\n    // There are a load more options to set up the device in different ways that could be added here\n    uint8_t buf[] = {0x6B, 0x80};\n    i2c_write_blocking(i2c_default, addr, buf, 2, false);\n    sleep_ms(100); // Allow device to reset and stabilize\n\n    // Clear sleep mode (0x6B register, 0x00 value)\n    buf[1] = 0x00;  // Clear sleep mode by writing 0x00 to the 0x6B register\n    i2c_write_blocking(i2c_default, addr, buf, 2, false); \n    sleep_ms(10); // Allow stabilization after waking up\n}\n\nstatic void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t *temp) {\n    // For this particular device, we send the device the register we want to read\n    // first, then subsequently read from the device. The register is auto incrementing\n    // so we don't need to keep sending the register we want, just the first.\n\n    uint8_t buffer[6];\n\n    // Start reading acceleration registers from register 0x3B for 6 bytes\n    uint8_t val = 0x3B;\n    i2c_write_blocking(i2c_default, addr, &val, 1, true); // true to keep master control of bus\n    i2c_read_blocking(i2c_default, addr, buffer, 6, false);",
+    "tags": [
+      "rp2040",
+      "pico",
+      "i2c",
+      "mpu6050",
+      "imu",
+      "accelerometer",
+      "gyroscope",
+      "sensor",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 MPU6050 IMU over I2C — part 2/3",
+    "description": "(continued) // For this particular device, we send the device the register we want to read",
+    "code": "// For this particular device, we send the device the register we want to read\n    // first, then subsequently read from the device. The register is auto incrementing\n    // so we don't need to keep sending the register we want, just the first.\n\n    uint8_t buffer[6];\n\n    // Start reading acceleration registers from register 0x3B for 6 bytes\n    uint8_t val = 0x3B;\n    i2c_write_blocking(i2c_default, addr, &val, 1, true); // true to keep master control of bus\n    i2c_read_blocking(i2c_default, addr, buffer, 6, false);\n\n    for (int i = 0; i < 3; i++) {\n        accel[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);\n    }\n\n    // Now gyro data from reg 0x43 for 6 bytes\n    // The register is auto incrementing on each read\n    val = 0x43;\n    i2c_write_blocking(i2c_default, addr, &val, 1, true);\n    i2c_read_blocking(i2c_default, addr, buffer, 6, false);  // False - finished with bus\n\n    for (int i = 0; i < 3; i++) {\n        gyro[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);;\n    }\n\n    // Now temperature from reg 0x41 for 2 bytes\n    // The register is auto incrementing on each read\n    val = 0x41;\n    i2c_write_blocking(i2c_default, addr, &val, 1, true);\n    i2c_read_blocking(i2c_default, addr, buffer, 2, false);  // False - finished with bus\n\n    *temp = buffer[0] << 8 | buffer[1];\n}\n#endif\n\nint main() {\n    stdio_init_all();\n#if !defined(i2c_default) || !defined(PICO_DEFAULT_I2C_SDA_PIN) || !defined(PICO_DEFAULT_I2C_SCL_PIN)\n    #warning i2c/mpu6050_i2c example requires a board with I2C pins\n    puts(\"Default I2C pins were not defined\");\n    return 0;\n#else\n    printf(\"Hello, MPU6050! Reading raw data from registers...\\n\");\n\n    // This example will use I2C0 on the default SDA and SCL pins (4, 5 on a Pico)\n    i2c_init(i2c_default, 400 * 1000);\n    gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);\n    gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);\n    gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);\n    gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);\n    // Make the I2C pins available to picotool\n    bi_decl(bi_2pins_with_func(PICO_DEFAULT_I2C_SDA_PIN, PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C));\n\n    mpu6050_reset();\n\n    int16_t acceleration[3], gyro[3], temp;\n\n    while (1) {\n        mpu6050_read_raw(acceleration, gyro, &temp);",
+    "tags": [
+      "rp2040",
+      "pico",
+      "i2c",
+      "mpu6050",
+      "imu",
+      "accelerometer",
+      "gyroscope",
+      "sensor",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 MPU6050 IMU over I2C — part 3/3",
+    "description": "(continued) // Make the I2C pins available to picotool",
+    "code": "// Make the I2C pins available to picotool\n    bi_decl(bi_2pins_with_func(PICO_DEFAULT_I2C_SDA_PIN, PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C));\n\n    mpu6050_reset();\n\n    int16_t acceleration[3], gyro[3], temp;\n\n    while (1) {\n        mpu6050_read_raw(acceleration, gyro, &temp);\n\n        // These are the raw numbers from the chip, so will need tweaking to be really useful.\n        // See the datasheet for more information\n        printf(\"Acc. X = %d, Y = %d, Z = %d\\n\", acceleration[0], acceleration[1], acceleration[2]);\n        printf(\"Gyro. X = %d, Y = %d, Z = %d\\n\", gyro[0], gyro[1], gyro[2]);\n        // Temperature is simple so use the datasheet calculation to get deg C.\n        // Note this is chip temperature.\n        printf(\"Temp. = %f\\n\", (temp / 340.0) + 36.53);\n\n        sleep_ms(100);\n    }\n#endif\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "i2c",
+      "mpu6050",
+      "imu",
+      "accelerometer",
+      "gyroscope",
+      "sensor",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 SPI with DMA Transfer — part 1/3",
+    "description": "Demonstrates bi-directional SPI data transfer using DMA channels for non-blocking high-speed communication.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n// Example of writing via DMA to the SPI interface and similarly reading it back via a loopback.\n\n#include <stdio.h>\n#include <stdlib.h>\n#include \"pico/stdlib.h\"\n#include \"pico/binary_info.h\"\n#include \"hardware/spi.h\"\n#include \"hardware/dma.h\"\n\n#define TEST_SIZE 1024\n\nint main() {\n    // Enable UART so we can print status output\n    stdio_init_all();\n#if !defined(spi_default) || !defined(PICO_DEFAULT_SPI_SCK_PIN) || !defined(PICO_DEFAULT_SPI_TX_PIN) || !defined(PICO_DEFAULT_SPI_RX_PIN) || !defined(PICO_DEFAULT_SPI_CSN_PIN)\n#warning spi/spi_dma example requires a board with SPI pins\n    puts(\"Default SPI pins were not defined\");\n#else\n\n    printf(\"SPI DMA example\\n\");\n\n    // Enable SPI at 1 MHz and connect to GPIOs\n    spi_init(spi_default, 1000 * 1000);\n    gpio_set_function(PICO_DEFAULT_SPI_RX_PIN, GPIO_FUNC_SPI);\n    gpio_init(PICO_DEFAULT_SPI_CSN_PIN);\n    gpio_set_function(PICO_DEFAULT_SPI_SCK_PIN, GPIO_FUNC_SPI);\n    gpio_set_function(PICO_DEFAULT_SPI_TX_PIN, GPIO_FUNC_SPI);\n    // Make the SPI pins available to picotool\n    bi_decl(bi_3pins_with_func(PICO_DEFAULT_SPI_RX_PIN, PICO_DEFAULT_SPI_TX_PIN, PICO_DEFAULT_SPI_SCK_PIN, GPIO_FUNC_SPI));\n    // Make the CS pin available to picotool\n    bi_decl(bi_1pin_with_name(PICO_DEFAULT_SPI_CSN_PIN, \"SPI CS\"));\n\n    // Grab some unused dma channels\n    const uint dma_tx = dma_claim_unused_channel(true);\n    const uint dma_rx = dma_claim_unused_channel(true);\n\n    // Force loopback for testing (I don't have an SPI device handy)\n    hw_set_bits(&spi_get_hw(spi_default)->cr1, SPI_SSPCR1_LBM_BITS);\n\n    static uint8_t txbuf[TEST_SIZE];\n    static uint8_t rxbuf[TEST_SIZE];\n    for (uint i = 0; i < TEST_SIZE; ++i) {\n        txbuf[i] = rand();\n    }\n\n    // We set the outbound DMA to transfer from a memory buffer to the SPI transmit FIFO paced by the SPI TX FIFO DREQ\n    // The default is for the read address to increment every element (in this case 1 byte = DMA_SIZE_8)\n    // and for the write address to remain unchanged.\n\n    printf(\"Configure TX DMA\\n\");\n    dma_channel_config c = dma_channel_get_default_config(dma_tx);\n    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);\n    channel_config_set_dreq(&c, spi_get_dreq(spi_default, true));\n    dma_channel_configure(dma_tx, &c,",
+    "tags": [
+      "rp2040",
+      "pico",
+      "spi",
+      "dma",
+      "non-blocking",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 SPI with DMA Transfer — part 2/3",
+    "description": "(continued) // We set the outbound DMA to transfer from a memory buffer to the SPI transmit ",
+    "code": "// We set the outbound DMA to transfer from a memory buffer to the SPI transmit FIFO paced by the SPI TX FIFO DREQ\n    // The default is for the read address to increment every element (in this case 1 byte = DMA_SIZE_8)\n    // and for the write address to remain unchanged.\n\n    printf(\"Configure TX DMA\\n\");\n    dma_channel_config c = dma_channel_get_default_config(dma_tx);\n    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);\n    channel_config_set_dreq(&c, spi_get_dreq(spi_default, true));\n    dma_channel_configure(dma_tx, &c,\n                          &spi_get_hw(spi_default)->dr, // write address\n                          txbuf, // read address\n                          TEST_SIZE, // element count (each element is of size transfer_data_size)\n                          false); // don't start yet\n\n    printf(\"Configure RX DMA\\n\");\n\n    // We set the inbound DMA to transfer from the SPI receive FIFO to a memory buffer paced by the SPI RX FIFO DREQ\n    // We configure the read address to remain unchanged for each element, but the write\n    // address to increment (so data is written throughout the buffer)\n    c = dma_channel_get_default_config(dma_rx);\n    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);\n    channel_config_set_dreq(&c, spi_get_dreq(spi_default, false));\n    channel_config_set_read_increment(&c, false);\n    channel_config_set_write_increment(&c, true);\n    dma_channel_configure(dma_rx, &c,\n                          rxbuf, // write address\n                          &spi_get_hw(spi_default)->dr, // read address\n                          TEST_SIZE, // element count (each element is of size transfer_data_size)\n                          false); // don't start yet\n\n\n    printf(\"Starting DMAs...\\n\");\n    // start them exactly simultaneously to avoid races (in extreme cases the FIFO could overflow)\n    dma_start_channel_mask((1u << dma_tx) | (1u << dma_rx));\n    printf(\"Wait for RX complete...\\n\");\n    dma_channel_wait_for_finish_blocking(dma_rx);\n    if (dma_channel_is_busy(dma_tx)) {\n        panic(\"RX completed before TX\");\n    }\n\n    printf(\"Done. Checking...\");\n    for (uint i = 0; i < TEST_SIZE; ++i) {\n        if (rxbuf[i] != txbuf[i]) {\n            panic(\"Mismatch at %d/%d: expected %02x, got %02x\",\n                  i, TEST_SIZE, txbuf[i], rxbuf[i]\n            );\n        }\n    }\n\n    printf(\"All good\\n\");\n    dma_channel_unclaim(dma_tx);\n    dma_channel_unclaim(dma_rx);\n    return 0;\n#endif\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "spi",
+      "dma",
+      "non-blocking",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 SPI with DMA Transfer — part 3/3",
+    "description": "(continued) printf(\"All good\\n\");",
+    "code": "printf(\"All good\\n\");\n    dma_channel_unclaim(dma_tx);\n    dma_channel_unclaim(dma_rx);\n    return 0;\n#endif\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "spi",
+      "dma",
+      "non-blocking",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 ADC Interactive Console — part 1/3",
+    "description": "Interactive UART console to read and display ADC values from any of the four RP2040 ADC channels on demand.",
+    "code": "#include <stdio.h>\n#include \"pico/stdlib.h\"\n#include \"hardware/gpio.h\"\n#include \"hardware/adc.h\"\n\n#define N_SAMPLES 1000\nuint16_t sample_buf[N_SAMPLES];\n\nvoid printhelp() {\n    puts(\"\\nCommands:\");\n    puts(\"c0, ...\\t: Select ADC channel n\");\n    puts(\"s\\t: Sample once\");\n    puts(\"S\\t: Sample many\");\n    puts(\"w\\t: Wiggle pins\");\n}\n\nvoid __not_in_flash_func(adc_capture)(uint16_t *buf, size_t count) {\n    adc_fifo_setup(true, false, 0, false, false);\n    adc_run(true);\n    for (size_t i = 0; i < count; i = i + 1)\n        buf[i] = adc_fifo_get_blocking();\n    adc_run(false);\n    adc_fifo_drain();\n}\n\nint main(void) {\n    stdio_init_all();\n    adc_init();\n    adc_set_temp_sensor_enabled(true);\n\n    // Set all pins to input (as far as SIO is concerned)\n    gpio_set_dir_all_bits(0);\n    for (int i = 2; i < 30; ++i) {\n        gpio_set_function(i, GPIO_FUNC_SIO);\n        if (i >= 26) {\n            gpio_disable_pulls(i);\n            gpio_set_input_enabled(i, false);\n        }\n    }\n\n    printf(\"\\n===========================\\n\");\n    printf(\"RP2040 ADC and Test Console\\n\");\n    printf(\"===========================\\n\");\n    printhelp();\n\n    while (1) {\n        char c = getchar();\n        printf(\"%c\", c);\n        switch (c) {\n            case 'c':\n                c = getchar();\n                printf(\"%c\\n\", c);\n                if (c < '0' || c > '7') {\n                    printf(\"Unknown input channel\\n\");\n                    printhelp();\n                } else {\n                    adc_select_input(c - '0');\n                    printf(\"Switched to channel %c\\n\", c);\n                }\n                break;",
+    "tags": [
+      "rp2040",
+      "pico",
+      "adc",
+      "console",
+      "analog",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 ADC Interactive Console — part 2/3",
+    "description": "(continued) c = getchar();",
+    "code": "c = getchar();\n                printf(\"%c\\n\", c);\n                if (c < '0' || c > '7') {\n                    printf(\"Unknown input channel\\n\");\n                    printhelp();\n                } else {\n                    adc_select_input(c - '0');\n                    printf(\"Switched to channel %c\\n\", c);\n                }\n                break;\n            case 's': {\n                uint32_t result = adc_read();\n                const float conversion_factor = 3.3f / (1 << 12);\n                printf(\"\\n0x%03x -> %f V\\n\", result, result * conversion_factor);\n                break;\n            }\n            case 'S': {\n                printf(\"\\nStarting capture\\n\");\n                adc_capture(sample_buf, N_SAMPLES);\n                printf(\"Done\\n\");\n                for (int i = 0; i < N_SAMPLES; i = i + 1)\n                    printf(\"%03x\\n\", sample_buf[i]);\n                break;\n            }\n            case 'w': {\n                printf(\"\\nPress any key to stop wiggling\\n\");\n                int i = 1;\n                gpio_set_dir_all_bits(-1);\n                while (getchar_timeout_us(0) == PICO_ERROR_TIMEOUT) {\n                    // Pattern: Flash all pins for a cycle,\n                    // Then scan along pins for one cycle each\n                    i = i ? i << 1 : 1;\n                    gpio_put_all(i ? i : ~0);\n                }\n                gpio_set_dir_all_bits(0);\n                printf(\"Wiggling halted.\\n\");\n                break;\n            }\n            case '\\n':\n            case '\\r':\n                break;\n            case 'h':\n                printhelp();\n                break;\n            default:\n                printf(\"\\nUnrecognised command: %c\\n\", c);\n                printhelp();\n                break;\n        }\n    }\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "adc",
+      "console",
+      "analog",
+      "pico-sdk",
+      "gpio"
+    ]
+  },
+  {
+    "title": "RP2040 ADC DMA Continuous Capture — part 1/3",
+    "description": "Captures ADC samples continuously into a buffer using DMA for high-speed analog data logging without CPU intervention.",
+    "code": "/**\n * Copyright (c) 2021 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n#include <stdio.h>\n#include \"pico/stdlib.h\"\n// For ADC input:\n#include \"hardware/adc.h\"\n#include \"hardware/dma.h\"\n// For resistor DAC output:\n#include \"pico/multicore.h\"\n#include \"hardware/pio.h\"\n#include \"resistor_dac.pio.h\"\n\n// This example uses the DMA to capture many samples from the ADC.\n//\n// - We are putting the ADC in free-running capture mode at 0.5 Msps\n//\n// - A DMA channel will be attached to the ADC sample FIFO\n//\n// - Configure the ADC to right-shift samples to 8 bits of significance, so we\n//   can DMA into a byte buffer\n//\n// This could be extended to use the ADC's round robin feature to sample two\n// channels concurrently at 0.25 Msps each.\n//\n// It would be nice to have some analog samples to measure! This example also\n// drives waves out through a 5-bit resistor DAC, as found on the reference\n// VGA board. If you have that board, you can take an M-F jumper wire from\n// GPIO 26 to the Green pin on the VGA connector (top row, next-but-rightmost\n// hole). Or you can ignore that part of the code and connect your own signal\n// to the ADC input.\n\n// Channel 0 is GPIO26\n#define CAPTURE_CHANNEL 0\n#define CAPTURE_DEPTH 1000\n\nuint8_t capture_buf[CAPTURE_DEPTH];\n\nvoid core1_main();\n\nint main() {\n    stdio_init_all();\n\n    // Send core 1 off to start driving the \"DAC\" whilst we configure the ADC.\n    multicore_launch_core1(core1_main);\n\n    // Init GPIO for analogue use: hi-Z, no pulls, disable digital input buffer.\n    adc_gpio_init(26 + CAPTURE_CHANNEL);\n\n    adc_init();\n    adc_select_input(CAPTURE_CHANNEL);\n    adc_fifo_setup(\n        true,    // Write each completed conversion to the sample FIFO\n        true,    // Enable DMA data request (DREQ)\n        1,       // DREQ (and IRQ) asserted when at least 1 sample present\n        false,   // We won't see the ERR bit because of 8 bit reads; disable.\n        true     // Shift each sample to 8 bits when pushing to FIFO",
+    "tags": [
+      "rp2040",
+      "pico",
+      "adc",
+      "dma",
+      "sampling",
+      "analog",
+      "buffer",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 ADC DMA Continuous Capture — part 2/3",
+    "description": "(continued) adc_gpio_init(26 + CAPTURE_CHANNEL);",
+    "code": "adc_gpio_init(26 + CAPTURE_CHANNEL);\n\n    adc_init();\n    adc_select_input(CAPTURE_CHANNEL);\n    adc_fifo_setup(\n        true,    // Write each completed conversion to the sample FIFO\n        true,    // Enable DMA data request (DREQ)\n        1,       // DREQ (and IRQ) asserted when at least 1 sample present\n        false,   // We won't see the ERR bit because of 8 bit reads; disable.\n        true     // Shift each sample to 8 bits when pushing to FIFO\n    );\n\n    // Divisor of 0 -> full speed. Free-running capture with the divider is\n    // equivalent to pressing the ADC_CS_START_ONCE button once per `div + 1`\n    // cycles (div not necessarily an integer). Each conversion takes 96\n    // cycles, so in general you want a divider of 0 (hold down the button\n    // continuously) or > 95 (take samples less frequently than 96 cycle\n    // intervals). This is all timed by the 48 MHz ADC clock.\n    adc_set_clkdiv(0);\n\n    printf(\"Arming DMA\\n\");\n    sleep_ms(1000);\n    // Set up the DMA to start transferring data as soon as it appears in FIFO\n    uint dma_chan = dma_claim_unused_channel(true);\n    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);\n\n    // Reading from constant address, writing to incrementing byte addresses\n    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_8);\n    channel_config_set_read_increment(&cfg, false);\n    channel_config_set_write_increment(&cfg, true);\n\n    // Pace transfers based on availability of ADC samples\n    channel_config_set_dreq(&cfg, DREQ_ADC);\n\n    dma_channel_configure(dma_chan, &cfg,\n        capture_buf,    // dst\n        &adc_hw->fifo,  // src\n        CAPTURE_DEPTH,  // transfer count\n        true            // start immediately\n    );\n\n    printf(\"Starting capture\\n\");\n    adc_run(true);\n\n    // Once DMA finishes, stop any new conversions from starting, and clean up\n    // the FIFO in case the ADC was still mid-conversion.\n    dma_channel_wait_for_finish_blocking(dma_chan);\n    printf(\"Capture finished\\n\");\n    adc_run(false);\n    adc_fifo_drain();\n\n    // Print samples to stdout so you can display them in pyplot, excel, matlab\n    for (int i = 0; i < CAPTURE_DEPTH; ++i) {\n        printf(\"%-3d, \", capture_buf[i]);\n        if (i % 10 == 9)\n            printf(\"\\n\");\n    }\n}\n\n// ----------------------------------------------------------------------------",
+    "tags": [
+      "rp2040",
+      "pico",
+      "adc",
+      "dma",
+      "sampling",
+      "analog",
+      "buffer",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 ADC DMA Continuous Capture — part 3/3",
+    "description": "(continued) // Print samples to stdout so you can display them in pyplot, excel, matlab",
+    "code": "// Print samples to stdout so you can display them in pyplot, excel, matlab\n    for (int i = 0; i < CAPTURE_DEPTH; ++i) {\n        printf(\"%-3d, \", capture_buf[i]);\n        if (i % 10 == 9)\n            printf(\"\\n\");\n    }\n}\n\n// ----------------------------------------------------------------------------\n// Code for driving the \"DAC\" output for us to measure\n\n// Core 1 is just going to sit and drive samples out continuously. PIO provides\n// consistent sample frequency.\n\n#define OUTPUT_FREQ_KHZ 5\n#define SAMPLE_WIDTH 5\n// This is the green channel on the VGA board\n#define DAC_PIN_BASE 6\n\nvoid core1_main() {\n    PIO pio = pio0;\n    uint sm = pio_claim_unused_sm(pio0, true);\n    uint offset = pio_add_program(pio0, &resistor_dac_5bit_program);\n    resistor_dac_5bit_program_init(pio0, sm, offset,\n        OUTPUT_FREQ_KHZ * 1000 * 2 * (1 << SAMPLE_WIDTH), DAC_PIN_BASE);\n    while (true) {\n        // Triangle wave\n        for (int i = 0; i < (1 << SAMPLE_WIDTH); ++i)\n            pio_sm_put_blocking(pio, sm, i);\n        for (int i = 0; i < (1 << SAMPLE_WIDTH); ++i)\n            pio_sm_put_blocking(pio, sm, (1 << SAMPLE_WIDTH) - 1 - i);\n    }\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "adc",
+      "dma",
+      "sampling",
+      "analog",
+      "buffer",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 PWM Signal Generation",
+    "description": "Configures a PWM slice to output a square wave at a specified frequency and duty cycle on a GPIO pin.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n// Output PWM signals on pins 0 and 1\n\n#include \"pico/stdlib.h\"\n#include \"hardware/pwm.h\"\n\nint main() {\n    /// \\tag::setup_pwm[]\n\n    // Tell GPIO 0 and 1 they are allocated to the PWM\n    gpio_set_function(0, GPIO_FUNC_PWM);\n    gpio_set_function(1, GPIO_FUNC_PWM);\n\n    // Find out which PWM slice is connected to GPIO 0 (it's slice 0)\n    uint slice_num = pwm_gpio_to_slice_num(0);\n\n    // Set period of 4 cycles (0 to 3 inclusive)\n    pwm_set_wrap(slice_num, 3);\n    // Set channel A output high for one cycle before dropping\n    pwm_set_chan_level(slice_num, PWM_CHAN_A, 1);\n    // Set initial B output high for three cycles before dropping\n    pwm_set_chan_level(slice_num, PWM_CHAN_B, 3);\n    // Set the PWM running\n    pwm_set_enabled(slice_num, true);\n    /// \\end::setup_pwm[]\n\n    // Note we could also use pwm_set_gpio_level(gpio, x) which looks up the\n    // correct slice and channel for a given GPIO.\n}\n",
+    "tags": [
+      "rp2040",
+      "pico",
+      "pwm",
+      "timer",
+      "gpio",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 Hardware Timer Alarm",
+    "description": "Sets up a repeating hardware timer alarm that fires a callback every second using the Pico SDK alarm API.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n#include <stdio.h>\n#include \"pico/stdlib.h\"\n\n/// \\tag::timer_example[]\nvolatile bool timer_fired = false;\n\nint64_t alarm_callback(alarm_id_t id, __unused void *user_data) {\n    printf(\"Timer %d fired!\\n\", (int) id);\n    timer_fired = true;\n    // Can return a value here in us to fire in the future\n    return 0;\n}\n\nbool repeating_timer_callback(__unused struct repeating_timer *t) {\n    printf(\"Repeat at %lld\\n\", time_us_64());\n    return true;\n}\n\nint main() {\n    stdio_init_all();\n    printf(\"Hello Timer!\\n\");\n\n    // Call alarm_callback in 2 seconds\n    add_alarm_in_ms(2000, alarm_callback, NULL, false);\n\n    // Wait for alarm callback to set timer_fired\n    while (!timer_fired) {\n        tight_loop_contents();\n    }\n\n    // Create a repeating timer that calls repeating_timer_callback.\n    // If the delay is > 0 then this is the delay between the previous callback ending and the next starting.\n    // If the delay is negative (see below) then the next call to the callback will be exactly 500ms after the\n    // start of the call to the last callback\n    struct repeating_timer timer;\n    add_repeating_timer_ms(500, repeating_timer_callback, NULL, &timer);\n    sleep_ms(3000);\n    bool cancelled = cancel_repeating_timer(&timer);\n    printf(\"cancelled... %d\\n\", cancelled);\n    sleep_ms(2000);\n\n    // Negative delay so means we will call repeating_timer_callback, and call it again\n    // 500ms later regardless of how long the callback took to execute\n    add_repeating_timer_ms(-500, repeating_timer_callback, NULL, &timer);\n    sleep_ms(3000);\n    cancelled = cancel_repeating_timer(&timer);\n    printf(\"cancelled... %d\\n\", cancelled);\n    sleep_ms(2000);\n    printf(\"Done\\n\");\n    return 0;\n}\n/// \\end::timer_example[]\n",
+    "tags": [
+      "rp2040",
+      "pico",
+      "timer",
+      "alarm",
+      "interrupt",
+      "callback",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 Watchdog Timer",
+    "description": "Configures the RP2040 hardware watchdog with a timeout and demonstrates safe reset and refresh patterns.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n#include <stdio.h>\n#include \"pico/stdlib.h\"\n#include \"hardware/watchdog.h\"\n\nint main() {\n    stdio_init_all();\n\n    if (watchdog_enable_caused_reboot()) {\n        printf(\"Rebooted by Watchdog!\\n\");\n        return 0;\n    } else {\n        printf(\"Clean boot\\n\");\n    }\n\n    // Enable the watchdog, requiring the watchdog to be updated every 100ms or the chip will reboot\n    // second arg is pause on debug which means the watchdog will pause when stepping through code\n    watchdog_enable(100, 1);\n\n    for (uint i = 0; i < 5; i++) {\n        printf(\"Updating watchdog %d\\n\", i);\n        watchdog_update();\n    }\n\n    // Wait in an infinite loop and don't update the watchdog so it reboots us\n    printf(\"Waiting to be rebooted by watchdog\\n\");\n    while(1);\n}\n",
+    "tags": [
+      "rp2040",
+      "pico",
+      "watchdog",
+      "reset",
+      "reliability",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 GPIO Interrupt Handler — part 1/2",
+    "description": "Configures a GPIO pin to trigger an interrupt on rising and falling edges and handles it with a callback.",
+    "code": "/**\n * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.\n *\n * SPDX-License-Identifier: BSD-3-Clause\n */\n\n#include <stdio.h>\n#include \"pico/stdlib.h\"\n#include \"hardware/gpio.h\"\n\n#define GPIO_WATCH_PIN 2\n\nstatic char event_str[128];\n\nvoid gpio_event_string(char *buf, uint32_t events);\n\nvoid gpio_callback(uint gpio, uint32_t events) {\n    // Put the GPIO event(s) that just happened into event_str\n    // so we can print it\n    gpio_event_string(event_str, events);\n    printf(\"GPIO %d %s\\n\", gpio, event_str);\n}\n\nint main() {\n    stdio_init_all();\n\n    printf(\"Hello GPIO IRQ\\n\");\n    gpio_init(GPIO_WATCH_PIN);\n    gpio_set_irq_enabled_with_callback(GPIO_WATCH_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_callback);\n\n    // Wait forever\n    while (1);\n}\n\n\nstatic const char *gpio_irq_str[] = {\n        \"LEVEL_LOW\",  // 0x1\n        \"LEVEL_HIGH\", // 0x2\n        \"EDGE_FALL\",  // 0x4\n        \"EDGE_RISE\"   // 0x8\n};\n\nvoid gpio_event_string(char *buf, uint32_t events) {\n    for (uint i = 0; i < 4; i++) {\n        uint mask = (1 << i);\n        if (events & mask) {\n            // Copy this event string into the user string\n            const char *event_str = gpio_irq_str[i];\n            while (*event_str != '\\0') {\n                *buf++ = *event_str++;\n            }\n            events &= ~mask;\n\n            // If more events add \", \"\n            if (events) {\n                *buf++ = ',';\n                *buf++ = ' ';\n            }\n        }\n    }",
+    "tags": [
+      "rp2040",
+      "pico",
+      "gpio",
+      "interrupt",
+      "irq",
+      "edge-detect",
+      "pico-sdk"
+    ]
+  },
+  {
+    "title": "RP2040 GPIO Interrupt Handler — part 2/2",
+    "description": "(continued) }",
+    "code": "}\n            events &= ~mask;\n\n            // If more events add \", \"\n            if (events) {\n                *buf++ = ',';\n                *buf++ = ' ';\n            }\n        }\n    }\n    *buf++ = '\\0';\n}",
+    "tags": [
+      "rp2040",
+      "pico",
+      "gpio",
+      "interrupt",
+      "irq",
+      "edge-detect",
+      "pico-sdk"
+    ]
+  }
+]

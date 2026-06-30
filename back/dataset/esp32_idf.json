@@ -1,0 +1,241 @@
+[
+  {
+    "title": "ESP32 UART Echo Example — part 1/2",
+    "description": "Configures UART2 on ESP32 at 115200 baud and echoes received bytes back to the sender using the ESP-IDF UART driver.",
+    "code": "/* UART Echo Example\n\n   This example code is in the Public Domain (or CC0 licensed, at your option.)\n\n   Unless required by applicable law or agreed to in writing, this\n   software is distributed on an \"AS IS\" BASIS, WITHOUT WARRANTIES OR\n   CONDITIONS OF ANY KIND, either express or implied.\n*/\n#include <stdio.h>\n#include \"freertos/FreeRTOS.h\"\n#include \"freertos/task.h\"\n#include \"driver/uart.h\"\n#include \"driver/gpio.h\"\n#include \"sdkconfig.h\"\n#include \"esp_log.h\"\n\n/**\n * This is an example which echos any data it receives on configured UART back to the sender,\n * with hardware flow control turned off. It does not use UART driver event queue.\n *\n * - Port: configured UART\n * - Receive (Rx) buffer: on\n * - Transmit (Tx) buffer: off\n * - Flow control: off\n * - Event queue: off\n * - Pin assignment: see defines below (See Kconfig)\n */\n\n#define ECHO_TEST_TXD (CONFIG_EXAMPLE_UART_TXD)\n#define ECHO_TEST_RXD (CONFIG_EXAMPLE_UART_RXD)\n#define ECHO_TEST_RTS (UART_PIN_NO_CHANGE)\n#define ECHO_TEST_CTS (UART_PIN_NO_CHANGE)\n\n#define ECHO_UART_PORT_NUM      (CONFIG_EXAMPLE_UART_PORT_NUM)\n#define ECHO_UART_BAUD_RATE     (CONFIG_EXAMPLE_UART_BAUD_RATE)\n#define ECHO_TASK_STACK_SIZE    (CONFIG_EXAMPLE_TASK_STACK_SIZE)\n\nstatic const char *TAG = \"UART TEST\";\n\n#define BUF_SIZE (1024)\n\nstatic void echo_task(void *arg)\n{\n    /* Configure parameters of an UART driver,\n     * communication pins and install the driver */\n    uart_config_t uart_config = {\n        .baud_rate = ECHO_UART_BAUD_RATE,\n        .data_bits = UART_DATA_8_BITS,\n        .parity    = UART_PARITY_DISABLE,\n        .stop_bits = UART_STOP_BITS_1,\n        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,\n        .source_clk = UART_SCLK_DEFAULT,\n    };\n    int intr_alloc_flags = 0;\n\n#if CONFIG_UART_ISR_IN_IRAM\n    intr_alloc_flags = ESP_INTR_FLAG_IRAM;\n#endif\n\n    ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));",
+    "tags": [
+      "esp32",
+      "uart",
+      "serial",
+      "echo",
+      "esp-idf",
+      "driver"
+    ]
+  },
+  {
+    "title": "ESP32 UART Echo Example — part 2/2",
+    "description": "(continued) .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,",
+    "code": ".flow_ctrl = UART_HW_FLOWCTRL_DISABLE,\n        .source_clk = UART_SCLK_DEFAULT,\n    };\n    int intr_alloc_flags = 0;\n\n#if CONFIG_UART_ISR_IN_IRAM\n    intr_alloc_flags = ESP_INTR_FLAG_IRAM;\n#endif\n\n    ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));\n    ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));\n    ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, ECHO_TEST_TXD, ECHO_TEST_RXD, ECHO_TEST_RTS, ECHO_TEST_CTS));\n\n    // Configure a temporary buffer for the incoming data\n    uint8_t *data = (uint8_t *) malloc(BUF_SIZE);\n\n    while (1) {\n        // Read data from the UART\n        int len = uart_read_bytes(ECHO_UART_PORT_NUM, data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);\n        // Write data back to the UART\n        uart_write_bytes(ECHO_UART_PORT_NUM, (const char *) data, len);\n        if (len) {\n            data[len] = '\\0';\n            ESP_LOGI(TAG, \"Recv str: %s\", (char *) data);\n        }\n    }\n}\n\nvoid app_main(void)\n{\n    xTaskCreate(echo_task, \"uart_echo_task\", ECHO_TASK_STACK_SIZE, NULL, 10, NULL);\n}",
+    "tags": [
+      "esp32",
+      "uart",
+      "serial",
+      "echo",
+      "esp-idf",
+      "driver"
+    ]
+  },
+  {
+    "title": "ESP32 GPIO Input/Output — part 1/3",
+    "description": "Demonstrates GPIO output toggling and interrupt-driven GPIO input using the ESP-IDF gpio_config and ISR handler APIs.",
+    "code": "/*\n * SPDX-FileCopyrightText: 2020-2025 Espressif Systems (Shanghai) CO LTD\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n\n#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#include <inttypes.h>\n#include \"freertos/FreeRTOS.h\"\n#include \"freertos/task.h\"\n#include \"freertos/queue.h\"\n#include \"driver/gpio.h\"\n\n/**\n * Brief:\n * This test code shows how to configure gpio and how to use gpio interrupt.\n *\n * GPIO status:\n * GPIO_OUTPUT_IO_0: output\n * GPIO_OUTPUT_IO_1: output\n * GPIO_INPUT_IO_0:  input, pulled up, interrupt from rising edge and falling edge\n * GPIO_INPUT_IO_1:  input, pulled up, interrupt from rising edge.\n *\n * Note. You can check the default GPIO pins to be used in menuconfig, and the IOs can be changed.\n *\n * Test:\n * Connect GPIO_OUTPUT_IO_0 with GPIO_INPUT_IO_0\n * Connect GPIO_OUTPUT_IO_1 with GPIO_INPUT_IO_1\n * Generate pulses on GPIO_OUTPUT_IO_0/1, that triggers interrupt on GPIO_INPUT_IO_0/1\n *\n */\n\n#define GPIO_OUTPUT_IO_0    CONFIG_GPIO_OUTPUT_0\n#define GPIO_OUTPUT_IO_1    CONFIG_GPIO_OUTPUT_1\n#define GPIO_OUTPUT_PIN_SEL  ((1ULL<<GPIO_OUTPUT_IO_0) | (1ULL<<GPIO_OUTPUT_IO_1))\n/*\n * Let's say, GPIO_OUTPUT_IO_0=18, GPIO_OUTPUT_IO_1=19\n * In binary representation,\n * 1ULL<<GPIO_OUTPUT_IO_0 is equal to 0000000000000000000001000000000000000000 and\n * 1ULL<<GPIO_OUTPUT_IO_1 is equal to 0000000000000000000010000000000000000000\n * GPIO_OUTPUT_PIN_SEL                0000000000000000000011000000000000000000\n * */\n#define GPIO_INPUT_IO_0     CONFIG_GPIO_INPUT_0\n#define GPIO_INPUT_IO_1     CONFIG_GPIO_INPUT_1\n#define GPIO_INPUT_PIN_SEL  ((1ULL<<GPIO_INPUT_IO_0) | (1ULL<<GPIO_INPUT_IO_1))\n/*\n * Let's say, GPIO_INPUT_IO_0=4, GPIO_INPUT_IO_1=5\n * In binary representation,\n * 1ULL<<GPIO_INPUT_IO_0 is equal to 0000000000000000000000000000000000010000 and\n * 1ULL<<GPIO_INPUT_IO_1 is equal to 0000000000000000000000000000000000100000\n * GPIO_INPUT_PIN_SEL                0000000000000000000000000000000000110000\n * */\n#define ESP_INTR_FLAG_DEFAULT 0\n\nstatic QueueHandle_t gpio_evt_queue = NULL;\n\nstatic void IRAM_ATTR gpio_isr_handler(void* arg)\n{",
+    "tags": [
+      "esp32",
+      "gpio",
+      "interrupt",
+      "isr",
+      "input",
+      "output",
+      "esp-idf",
+      "freertos-queue"
+    ]
+  },
+  {
+    "title": "ESP32 GPIO Input/Output — part 2/3",
+    "description": "(continued) * 1ULL<<GPIO_INPUT_IO_0 is equal to 0000000000000000000000000000000000010000 and",
+    "code": "* 1ULL<<GPIO_INPUT_IO_0 is equal to 0000000000000000000000000000000000010000 and\n * 1ULL<<GPIO_INPUT_IO_1 is equal to 0000000000000000000000000000000000100000\n * GPIO_INPUT_PIN_SEL                0000000000000000000000000000000000110000\n * */\n#define ESP_INTR_FLAG_DEFAULT 0\n\nstatic QueueHandle_t gpio_evt_queue = NULL;\n\nstatic void IRAM_ATTR gpio_isr_handler(void* arg)\n{\n    uint32_t gpio_num = (uint32_t) arg;\n    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);\n}\n\nstatic void gpio_task_example(void* arg)\n{\n    uint32_t io_num;\n    for (;;) {\n        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {\n            printf(\"GPIO[%\"PRIu32\"] intr, val: %d\\n\", io_num, gpio_get_level(io_num));\n        }\n    }\n}\n\nvoid app_main(void)\n{\n    //zero-initialize the config structure.\n    gpio_config_t io_conf = {};\n    //disable interrupt\n    io_conf.intr_type = GPIO_INTR_DISABLE;\n    //set as output mode\n    io_conf.mode = GPIO_MODE_OUTPUT;\n    //bit mask of the pins that you want to set,e.g.GPIO18/19\n    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;\n    //disable pull-down mode\n    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;\n    //disable pull-up mode\n    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;\n    //configure GPIO with the given settings\n    gpio_config(&io_conf);\n\n    //interrupt of rising edge\n    io_conf.intr_type = GPIO_INTR_POSEDGE;\n    //bit mask of the pins, use GPIO4/5 here\n    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;\n    //set as input mode\n    io_conf.mode = GPIO_MODE_INPUT;\n    //enable pull-up mode\n    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;\n    gpio_config(&io_conf);\n\n    //change gpio interrupt type for one pin\n    gpio_set_intr_type(GPIO_INPUT_IO_0, GPIO_INTR_ANYEDGE);\n\n    //create a queue to handle gpio event from isr\n    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));\n    //start gpio task\n    xTaskCreate(gpio_task_example, \"gpio_task_example\", 2048, NULL, 10, NULL);\n\n    //install gpio isr service",
+    "tags": [
+      "esp32",
+      "gpio",
+      "interrupt",
+      "isr",
+      "input",
+      "output",
+      "esp-idf",
+      "freertos-queue"
+    ]
+  },
+  {
+    "title": "ESP32 GPIO Input/Output — part 3/3",
+    "description": "(continued) //change gpio interrupt type for one pin",
+    "code": "//change gpio interrupt type for one pin\n    gpio_set_intr_type(GPIO_INPUT_IO_0, GPIO_INTR_ANYEDGE);\n\n    //create a queue to handle gpio event from isr\n    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));\n    //start gpio task\n    xTaskCreate(gpio_task_example, \"gpio_task_example\", 2048, NULL, 10, NULL);\n\n    //install gpio isr service\n    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);\n    //hook isr handler for specific gpio pin\n    gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);\n    //hook isr handler for specific gpio pin\n    gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);\n\n    //remove isr handler for gpio number.\n    gpio_isr_handler_remove(GPIO_INPUT_IO_0);\n    //hook isr handler for specific gpio pin again\n    gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);\n\n    printf(\"Minimum free heap size: %\"PRIu32\" bytes\\n\", esp_get_minimum_free_heap_size());\n\n    int cnt = 0;\n    while (1) {\n        printf(\"cnt: %d\\n\", cnt++);\n        vTaskDelay(1000 / portTICK_PERIOD_MS);\n        gpio_set_level(GPIO_OUTPUT_IO_0, cnt % 2);\n        gpio_set_level(GPIO_OUTPUT_IO_1, cnt % 2);\n    }\n}",
+    "tags": [
+      "esp32",
+      "gpio",
+      "interrupt",
+      "isr",
+      "input",
+      "output",
+      "esp-idf",
+      "freertos-queue"
+    ]
+  },
+  {
+    "title": "ESP32 ADC One-Shot Read — part 1/5",
+    "description": "Reads a single ADC sample from multiple channels using the ESP-IDF ADC one-shot mode API with calibration.",
+    "code": "/*\n * SPDX-FileCopyrightText: 2022-2023 Espressif Systems (Shanghai) CO LTD\n *\n * SPDX-License-Identifier: Apache-2.0\n */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include \"freertos/FreeRTOS.h\"\n#include \"freertos/task.h\"\n#include \"soc/soc_caps.h\"\n#include \"esp_log.h\"\n#include \"esp_adc/adc_oneshot.h\"\n#include \"esp_adc/adc_cali.h\"\n#include \"esp_adc/adc_cali_scheme.h\"\n\nconst static char *TAG = \"EXAMPLE\";\n\n/*---------------------------------------------------------------\n        ADC General Macros\n---------------------------------------------------------------*/\n//ADC1 Channels\n#if CONFIG_IDF_TARGET_ESP32\n#define EXAMPLE_ADC1_CHAN0          ADC_CHANNEL_4\n#define EXAMPLE_ADC1_CHAN1          ADC_CHANNEL_5\n#else\n#define EXAMPLE_ADC1_CHAN0          ADC_CHANNEL_2\n#define EXAMPLE_ADC1_CHAN1          ADC_CHANNEL_3\n#endif\n\n#if (SOC_ADC_PERIPH_NUM >= 2) && !CONFIG_IDF_TARGET_ESP32C3\n/**\n * On ESP32C3, ADC2 is no longer supported, due to its HW limitation.\n * Search for errata on espressif website for more details.\n */\n#define EXAMPLE_USE_ADC2            1\n#endif\n\n#if EXAMPLE_USE_ADC2\n//ADC2 Channels\n#define EXAMPLE_ADC2_CHAN0          ADC_CHANNEL_0\n#endif  //#if EXAMPLE_USE_ADC2\n\n#if SOC_ADC_ATTEN_NUM <= 1\n#define EXAMPLE_ADC_ATTEN           ADC_ATTEN_DB_0\n#else\n#define EXAMPLE_ADC_ATTEN           ADC_ATTEN_DB_12\n#endif\n\nstatic int adc_raw[2][10];\nstatic int voltage[2][10];\nstatic bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);\nstatic void example_adc_calibration_deinit(adc_cali_handle_t handle);\n\nvoid app_main(void)\n{\n    //-------------ADC1 Init---------------//\n    adc_oneshot_unit_handle_t adc1_handle;\n    adc_oneshot_unit_init_cfg_t init_config1 = {\n        .unit_id = ADC_UNIT_1,",
+    "tags": [
+      "esp32",
+      "adc",
+      "analog",
+      "oneshot",
+      "calibration",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 ADC One-Shot Read — part 2/5",
+    "description": "(continued) static int voltage[2][10];",
+    "code": "static int voltage[2][10];\nstatic bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle);\nstatic void example_adc_calibration_deinit(adc_cali_handle_t handle);\n\nvoid app_main(void)\n{\n    //-------------ADC1 Init---------------//\n    adc_oneshot_unit_handle_t adc1_handle;\n    adc_oneshot_unit_init_cfg_t init_config1 = {\n        .unit_id = ADC_UNIT_1,\n    };\n    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));\n\n    //-------------ADC1 Config---------------//\n    adc_oneshot_chan_cfg_t config = {\n        .atten = EXAMPLE_ADC_ATTEN,\n        .bitwidth = ADC_BITWIDTH_DEFAULT,\n    };\n    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, EXAMPLE_ADC1_CHAN0, &config));\n    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, EXAMPLE_ADC1_CHAN1, &config));\n\n    //-------------ADC1 Calibration Init---------------//\n    adc_cali_handle_t adc1_cali_chan0_handle = NULL;\n    adc_cali_handle_t adc1_cali_chan1_handle = NULL;\n    bool do_calibration1_chan0 = example_adc_calibration_init(ADC_UNIT_1, EXAMPLE_ADC1_CHAN0, EXAMPLE_ADC_ATTEN, &adc1_cali_chan0_handle);\n    bool do_calibration1_chan1 = example_adc_calibration_init(ADC_UNIT_1, EXAMPLE_ADC1_CHAN1, EXAMPLE_ADC_ATTEN, &adc1_cali_chan1_handle);\n\n#if EXAMPLE_USE_ADC2\n    //-------------ADC2 Init---------------//\n    adc_oneshot_unit_handle_t adc2_handle;\n    adc_oneshot_unit_init_cfg_t init_config2 = {\n        .unit_id = ADC_UNIT_2,\n        .ulp_mode = ADC_ULP_MODE_DISABLE,\n    };\n    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config2, &adc2_handle));\n\n    //-------------ADC2 Calibration Init---------------//\n    adc_cali_handle_t adc2_cali_handle = NULL;\n    bool do_calibration2 = example_adc_calibration_init(ADC_UNIT_2, EXAMPLE_ADC2_CHAN0, EXAMPLE_ADC_ATTEN, &adc2_cali_handle);\n\n    //-------------ADC2 Config---------------//\n    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc2_handle, EXAMPLE_ADC2_CHAN0, &config));\n#endif  //#if EXAMPLE_USE_ADC2\n\n    while (1) {\n        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, EXAMPLE_ADC1_CHAN0, &adc_raw[0][0]));\n        ESP_LOGI(TAG, \"ADC%d Channel[%d] Raw Data: %d\", ADC_UNIT_1 + 1, EXAMPLE_ADC1_CHAN0, adc_raw[0][0]);\n        if (do_calibration1_chan0) {\n            ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_chan0_handle, adc_raw[0][0], &voltage[0][0]));\n            ESP_LOGI(TAG, \"ADC%d Channel[%d] Cali Voltage: %d mV\", ADC_UNIT_1 + 1, EXAMPLE_ADC1_CHAN0, voltage[0][0]);\n        }\n        vTaskDelay(pdMS_TO_TICKS(1000));\n\n        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, EXAMPLE_ADC1_CHAN1, &adc_raw[0][1]));\n        ESP_LOGI(TAG, \"ADC%d Channel[%d] Raw Data: %d\", ADC_UNIT_1 + 1, EXAMPLE_ADC1_CHAN1, adc_raw[0][1]);\n        if (do_calibration1_chan1) {\n            ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_chan1_handle, adc_raw[0][1], &voltage[0][1]));\n            ESP_LOGI(TAG, \"ADC%d Channel[%d] Cali Voltage: %d mV\", ADC_UNIT_1 + 1, EXAMPLE_ADC1_CHAN1, voltage[0][1]);\n        }\n        vTaskDelay(pdMS_TO_TICKS(1000));",
+    "tags": [
+      "esp32",
+      "adc",
+      "analog",
+      "oneshot",
+      "calibration",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 ADC One-Shot Read — part 3/5",
+    "description": "(continued) }",
+    "code": "}\n        vTaskDelay(pdMS_TO_TICKS(1000));\n\n        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, EXAMPLE_ADC1_CHAN1, &adc_raw[0][1]));\n        ESP_LOGI(TAG, \"ADC%d Channel[%d] Raw Data: %d\", ADC_UNIT_1 + 1, EXAMPLE_ADC1_CHAN1, adc_raw[0][1]);\n        if (do_calibration1_chan1) {\n            ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_chan1_handle, adc_raw[0][1], &voltage[0][1]));\n            ESP_LOGI(TAG, \"ADC%d Channel[%d] Cali Voltage: %d mV\", ADC_UNIT_1 + 1, EXAMPLE_ADC1_CHAN1, voltage[0][1]);\n        }\n        vTaskDelay(pdMS_TO_TICKS(1000));\n\n#if EXAMPLE_USE_ADC2\n        ESP_ERROR_CHECK(adc_oneshot_read(adc2_handle, EXAMPLE_ADC2_CHAN0, &adc_raw[1][0]));\n        ESP_LOGI(TAG, \"ADC%d Channel[%d] Raw Data: %d\", ADC_UNIT_2 + 1, EXAMPLE_ADC2_CHAN0, adc_raw[1][0]);\n        if (do_calibration2) {\n            ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc2_cali_handle, adc_raw[1][0], &voltage[1][0]));\n            ESP_LOGI(TAG, \"ADC%d Channel[%d] Cali Voltage: %d mV\", ADC_UNIT_2 + 1, EXAMPLE_ADC2_CHAN0, voltage[1][0]);\n        }\n        vTaskDelay(pdMS_TO_TICKS(1000));\n#endif  //#if EXAMPLE_USE_ADC2\n    }\n\n    //Tear Down\n    ESP_ERROR_CHECK(adc_oneshot_del_unit(adc1_handle));\n    if (do_calibration1_chan0) {\n        example_adc_calibration_deinit(adc1_cali_chan0_handle);\n    }\n    if (do_calibration1_chan1) {\n        example_adc_calibration_deinit(adc1_cali_chan1_handle);\n    }\n\n#if EXAMPLE_USE_ADC2\n    ESP_ERROR_CHECK(adc_oneshot_del_unit(adc2_handle));\n    if (do_calibration2) {\n        example_adc_calibration_deinit(adc2_cali_handle);\n    }\n#endif //#if EXAMPLE_USE_ADC2\n}\n\n/*---------------------------------------------------------------\n        ADC Calibration\n---------------------------------------------------------------*/\nstatic bool example_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)\n{\n    adc_cali_handle_t handle = NULL;\n    esp_err_t ret = ESP_FAIL;\n    bool calibrated = false;\n\n#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED\n    if (!calibrated) {\n        ESP_LOGI(TAG, \"calibration scheme version is %s\", \"Curve Fitting\");\n        adc_cali_curve_fitting_config_t cali_config = {\n            .unit_id = unit,\n            .chan = channel,\n            .atten = atten,\n            .bitwidth = ADC_BITWIDTH_DEFAULT,\n        };\n        ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);\n        if (ret == ESP_OK) {\n            calibrated = true;",
+    "tags": [
+      "esp32",
+      "adc",
+      "analog",
+      "oneshot",
+      "calibration",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 ADC One-Shot Read — part 4/5",
+    "description": "(continued) ESP_LOGI(TAG, \"calibration scheme version is %s\", \"Curve Fitting\");",
+    "code": "ESP_LOGI(TAG, \"calibration scheme version is %s\", \"Curve Fitting\");\n        adc_cali_curve_fitting_config_t cali_config = {\n            .unit_id = unit,\n            .chan = channel,\n            .atten = atten,\n            .bitwidth = ADC_BITWIDTH_DEFAULT,\n        };\n        ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);\n        if (ret == ESP_OK) {\n            calibrated = true;\n        }\n    }\n#endif\n\n#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED\n    if (!calibrated) {\n        ESP_LOGI(TAG, \"calibration scheme version is %s\", \"Line Fitting\");\n        adc_cali_line_fitting_config_t cali_config = {\n            .unit_id = unit,\n            .atten = atten,\n            .bitwidth = ADC_BITWIDTH_DEFAULT,\n        };\n        ret = adc_cali_create_scheme_line_fitting(&cali_config, &handle);\n        if (ret == ESP_OK) {\n            calibrated = true;\n        }\n    }\n#endif\n\n    *out_handle = handle;\n    if (ret == ESP_OK) {\n        ESP_LOGI(TAG, \"Calibration Success\");\n    } else if (ret == ESP_ERR_NOT_SUPPORTED || !calibrated) {\n        ESP_LOGW(TAG, \"eFuse not burnt, skip software calibration\");\n    } else {\n        ESP_LOGE(TAG, \"Invalid arg or no memory\");\n    }\n\n    return calibrated;\n}\n\nstatic void example_adc_calibration_deinit(adc_cali_handle_t handle)\n{\n#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED\n    ESP_LOGI(TAG, \"deregister %s calibration scheme\", \"Curve Fitting\");\n    ESP_ERROR_CHECK(adc_cali_delete_scheme_curve_fitting(handle));\n\n#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED\n    ESP_LOGI(TAG, \"deregister %s calibration scheme\", \"Line Fitting\");\n    ESP_ERROR_CHECK(adc_cali_delete_scheme_line_fitting(handle));\n#endif\n}",
+    "tags": [
+      "esp32",
+      "adc",
+      "analog",
+      "oneshot",
+      "calibration",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 FreeRTOS Real-Time Stats — part 1/4",
+    "description": "Creates multiple FreeRTOS tasks on ESP32 and collects per-task CPU usage statistics using the vTaskGetRunTimeStats API.",
+    "code": "/* FreeRTOS Real Time Stats Example\n\n   This example code is in the Public Domain (or CC0 licensed, at your option.)\n\n   Unless required by applicable law or agreed to in writing, this\n   software is distributed on an \"AS IS\" BASIS, WITHOUT WARRANTIES OR\n   CONDITIONS OF ANY KIND, either express or implied.\n*/\n\n#include \"sdkconfig.h\"\n#include <stdio.h>\n#include <stdlib.h>\n#include <inttypes.h>\n#include \"freertos/FreeRTOS.h\"\n#include \"freertos/task.h\"\n#include \"freertos/semphr.h\"\n#include \"esp_err.h\"\n\n#define NUM_OF_SPIN_TASKS   6\n#define SPIN_ITER           500000  //Actual CPU cycles used will depend on compiler optimization\n#define SPIN_TASK_PRIO      2\n#define STATS_TASK_PRIO     3\n#define STATS_TICKS         pdMS_TO_TICKS(1000)\n#define ARRAY_SIZE_OFFSET   5   //Increase this if print_real_time_stats returns ESP_ERR_INVALID_SIZE\n\nstatic char task_names[NUM_OF_SPIN_TASKS][configMAX_TASK_NAME_LEN];\nstatic SemaphoreHandle_t sync_spin_task;\nstatic SemaphoreHandle_t sync_stats_task;\n\n/**\n * @brief   Function to print the CPU usage of tasks over a given duration.\n *\n * This function will measure and print the CPU usage of tasks over a specified\n * number of ticks (i.e. real time stats). This is implemented by simply calling\n * uxTaskGetSystemState() twice separated by a delay, then calculating the\n * differences of task run times before and after the delay.\n *\n * @note    If any tasks are added or removed during the delay, the stats of\n *          those tasks will not be printed.\n * @note    This function should be called from a high priority task to minimize\n *          inaccuracies with delays.\n * @note    When running in dual core mode, each core will correspond to 50% of\n *          the run time.\n *\n * @param   xTicksToWait    Period of stats measurement\n *\n * @return\n *  - ESP_OK                Success\n *  - ESP_ERR_NO_MEM        Insufficient memory to allocated internal arrays\n *  - ESP_ERR_INVALID_SIZE  Insufficient array size for uxTaskGetSystemState. Trying increasing ARRAY_SIZE_OFFSET\n *  - ESP_ERR_INVALID_STATE Delay duration too short\n */\nstatic esp_err_t print_real_time_stats(TickType_t xTicksToWait)\n{\n    TaskStatus_t *start_array = NULL, *end_array = NULL;\n    UBaseType_t start_array_size, end_array_size;\n    configRUN_TIME_COUNTER_TYPE start_run_time, end_run_time;\n    esp_err_t ret;\n\n    //Allocate array to store current task states",
+    "tags": [
+      "esp32",
+      "freertos",
+      "rtos",
+      "tasks",
+      "cpu",
+      "stats",
+      "scheduling",
+      "esp-idf",
+      "freertos-semaphore"
+    ]
+  },
+  {
+    "title": "ESP32 FreeRTOS Real-Time Stats — part 2/4",
+    "description": "(continued) *  - ESP_ERR_INVALID_STATE Delay duration too short",
+    "code": "*  - ESP_ERR_INVALID_STATE Delay duration too short\n */\nstatic esp_err_t print_real_time_stats(TickType_t xTicksToWait)\n{\n    TaskStatus_t *start_array = NULL, *end_array = NULL;\n    UBaseType_t start_array_size, end_array_size;\n    configRUN_TIME_COUNTER_TYPE start_run_time, end_run_time;\n    esp_err_t ret;\n\n    //Allocate array to store current task states\n    start_array_size = uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET;\n    start_array = malloc(sizeof(TaskStatus_t) * start_array_size);\n    if (start_array == NULL) {\n        ret = ESP_ERR_NO_MEM;\n        goto exit;\n    }\n    //Get current task states\n    start_array_size = uxTaskGetSystemState(start_array, start_array_size, &start_run_time);\n    if (start_array_size == 0) {\n        ret = ESP_ERR_INVALID_SIZE;\n        goto exit;\n    }\n\n    vTaskDelay(xTicksToWait);\n\n    //Allocate array to store tasks states post delay\n    end_array_size = uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET;\n    end_array = malloc(sizeof(TaskStatus_t) * end_array_size);\n    if (end_array == NULL) {\n        ret = ESP_ERR_NO_MEM;\n        goto exit;\n    }\n    //Get post delay task states\n    end_array_size = uxTaskGetSystemState(end_array, end_array_size, &end_run_time);\n    if (end_array_size == 0) {\n        ret = ESP_ERR_INVALID_SIZE;\n        goto exit;\n    }\n\n    //Calculate total_elapsed_time in units of run time stats clock period.\n    uint32_t total_elapsed_time = (end_run_time - start_run_time);\n    if (total_elapsed_time == 0) {\n        ret = ESP_ERR_INVALID_STATE;\n        goto exit;\n    }\n\n    printf(\"| Task | Run Time | Percentage\\n\");\n    //Match each task in start_array to those in the end_array\n    for (int i = 0; i < start_array_size; i++) {\n        int k = -1;\n        for (int j = 0; j < end_array_size; j++) {\n            if (start_array[i].xHandle == end_array[j].xHandle) {\n                k = j;\n                //Mark that task have been matched by overwriting their handles\n                start_array[i].xHandle = NULL;\n                end_array[j].xHandle = NULL;\n                break;\n            }\n        }\n        //Check if matching task found",
+    "tags": [
+      "esp32",
+      "freertos",
+      "rtos",
+      "tasks",
+      "cpu",
+      "stats",
+      "scheduling",
+      "esp-idf",
+      "freertos-semaphore"
+    ]
+  },
+  {
+    "title": "ESP32 FreeRTOS Real-Time Stats — part 3/4",
+    "description": "(continued) for (int j = 0; j < end_array_size; j++) {",
+    "code": "for (int j = 0; j < end_array_size; j++) {\n            if (start_array[i].xHandle == end_array[j].xHandle) {\n                k = j;\n                //Mark that task have been matched by overwriting their handles\n                start_array[i].xHandle = NULL;\n                end_array[j].xHandle = NULL;\n                break;\n            }\n        }\n        //Check if matching task found\n        if (k >= 0) {\n            uint32_t task_elapsed_time = end_array[k].ulRunTimeCounter - start_array[i].ulRunTimeCounter;\n            uint32_t percentage_time = (task_elapsed_time * 100UL) / (total_elapsed_time * CONFIG_FREERTOS_NUMBER_OF_CORES);\n            printf(\"| %s | %\"PRIu32\" | %\"PRIu32\"%%\\n\", start_array[i].pcTaskName, task_elapsed_time, percentage_time);\n        }\n    }\n\n    //Print unmatched tasks\n    for (int i = 0; i < start_array_size; i++) {\n        if (start_array[i].xHandle != NULL) {\n            printf(\"| %s | Deleted\\n\", start_array[i].pcTaskName);\n        }\n    }\n    for (int i = 0; i < end_array_size; i++) {\n        if (end_array[i].xHandle != NULL) {\n            printf(\"| %s | Created\\n\", end_array[i].pcTaskName);\n        }\n    }\n    ret = ESP_OK;\n\nexit:    //Common return path\n    free(start_array);\n    free(end_array);\n    return ret;\n}\n\nstatic void spin_task(void *arg)\n{\n    xSemaphoreTake(sync_spin_task, portMAX_DELAY);\n    while (1) {\n        //Consume CPU cycles\n        for (int i = 0; i < SPIN_ITER; i++) {\n            __asm__ __volatile__(\"NOP\");\n        }\n        vTaskDelay(pdMS_TO_TICKS(100));\n    }\n}\n\nstatic void stats_task(void *arg)\n{\n    xSemaphoreTake(sync_stats_task, portMAX_DELAY);\n\n    //Start all the spin tasks\n    for (int i = 0; i < NUM_OF_SPIN_TASKS; i++) {\n        xSemaphoreGive(sync_spin_task);\n    }\n\n    //Print real time stats periodically\n    while (1) {\n        printf(\"\\n\\nGetting real time stats over %\"PRIu32\" ticks\\n\", STATS_TICKS);",
+    "tags": [
+      "esp32",
+      "freertos",
+      "rtos",
+      "tasks",
+      "cpu",
+      "stats",
+      "scheduling",
+      "esp-idf",
+      "freertos-semaphore"
+    ]
+  },
+  {
+    "title": "ESP32 FreeRTOS Real-Time Stats — part 4/4",
+    "description": "(continued) xSemaphoreTake(sync_stats_task, portMAX_DELAY);",
+    "code": "xSemaphoreTake(sync_stats_task, portMAX_DELAY);\n\n    //Start all the spin tasks\n    for (int i = 0; i < NUM_OF_SPIN_TASKS; i++) {\n        xSemaphoreGive(sync_spin_task);\n    }\n\n    //Print real time stats periodically\n    while (1) {\n        printf(\"\\n\\nGetting real time stats over %\"PRIu32\" ticks\\n\", STATS_TICKS);\n        if (print_real_time_stats(STATS_TICKS) == ESP_OK) {\n            printf(\"Real time stats obtained\\n\");\n        } else {\n            printf(\"Error getting real time stats\\n\");\n        }\n        vTaskDelay(pdMS_TO_TICKS(1000));\n    }\n}\n\nvoid app_main(void)\n{\n    //Allow other core to finish initialization\n    vTaskDelay(pdMS_TO_TICKS(100));\n\n    //Create semaphores to synchronize\n    sync_spin_task = xSemaphoreCreateCounting(NUM_OF_SPIN_TASKS, 0);\n    sync_stats_task = xSemaphoreCreateBinary();\n\n    //Create spin tasks\n    for (int i = 0; i < NUM_OF_SPIN_TASKS; i++) {\n        snprintf(task_names[i], configMAX_TASK_NAME_LEN, \"spin%d\", i);\n        xTaskCreatePinnedToCore(spin_task, task_names[i], 1024, NULL, SPIN_TASK_PRIO, NULL, tskNO_AFFINITY);\n    }\n\n    //Create and start stats task\n    xTaskCreatePinnedToCore(stats_task, \"stats\", 4096, NULL, STATS_TASK_PRIO, NULL, tskNO_AFFINITY);\n    xSemaphoreGive(sync_stats_task);\n}",
+    "tags": [
+      "esp32",
+      "freertos",
+      "rtos",
+      "tasks",
+      "cpu",
+      "stats",
+      "scheduling",
+      "esp-idf",
+      "freertos-semaphore"
+    ]
+  },
+  {
+    "title": "ESP32 WiFi Station Mode — part 1/4",
+    "description": "Connects the ESP32 to a WiFi access point in station mode using the ESP-IDF WiFi stack and event loop API.",
+    "code": "/* WiFi station Example\n\n   This example code is in the Public Domain (or CC0 licensed, at your option.)\n\n   Unless required by applicable law or agreed to in writing, this\n   software is distributed on an \"AS IS\" BASIS, WITHOUT WARRANTIES OR\n   CONDITIONS OF ANY KIND, either express or implied.\n*/\n#include <string.h>\n#include \"freertos/FreeRTOS.h\"\n#include \"freertos/task.h\"\n#include \"freertos/event_groups.h\"\n#include \"esp_system.h\"\n#include \"esp_wifi.h\"\n#include \"esp_event.h\"\n#include \"esp_log.h\"\n#include \"nvs_flash.h\"\n\n#include \"lwip/err.h\"\n#include \"lwip/sys.h\"\n\n/* The examples use WiFi configuration that you can set via project configuration menu\n\n   If you'd rather not, just change the below entries to strings with\n   the config you want - ie #define EXAMPLE_WIFI_SSID \"mywifissid\"\n*/\n#define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID\n#define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD\n#define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY\n\n#if CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HUNT_AND_PECK\n#define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_HUNT_AND_PECK\n#define EXAMPLE_H2E_IDENTIFIER \"\"\n#elif CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HASH_TO_ELEMENT\n#define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_HASH_TO_ELEMENT\n#define EXAMPLE_H2E_IDENTIFIER CONFIG_ESP_WIFI_PW_ID\n#elif CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_BOTH\n#define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_BOTH\n#define EXAMPLE_H2E_IDENTIFIER CONFIG_ESP_WIFI_PW_ID\n#endif\n#if CONFIG_ESP_WIFI_AUTH_OPEN\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_OPEN\n#elif CONFIG_ESP_WIFI_AUTH_WEP\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WEP\n#elif CONFIG_ESP_WIFI_AUTH_WPA_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WPA2_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WPA_WPA2_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_WPA2_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WPA3_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA3_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WPA2_WPA3_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_WPA3_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WAPI_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK\n#endif\n\n/* FreeRTOS event group to signal when we are connected*/\nstatic EventGroupHandle_t s_wifi_event_group;",
+    "tags": [
+      "esp32",
+      "wifi",
+      "station",
+      "networking",
+      "event-loop",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 WiFi Station Mode — part 2/4",
+    "description": "(continued) #elif CONFIG_ESP_WIFI_AUTH_WPA3_PSK",
+    "code": "#elif CONFIG_ESP_WIFI_AUTH_WPA3_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA3_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WPA2_WPA3_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_WPA3_PSK\n#elif CONFIG_ESP_WIFI_AUTH_WAPI_PSK\n#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK\n#endif\n\n/* FreeRTOS event group to signal when we are connected*/\nstatic EventGroupHandle_t s_wifi_event_group;\n\n/* The event group allows multiple bits for each event, but we only care about two events:\n * - we are connected to the AP with an IP\n * - we failed to connect after the maximum amount of retries */\n#define WIFI_CONNECTED_BIT BIT0\n#define WIFI_FAIL_BIT      BIT1\n\nstatic const char *TAG = \"wifi station\";\n\nstatic int s_retry_num = 0;\n\n\nstatic void event_handler(void* arg, esp_event_base_t event_base,\n                                int32_t event_id, void* event_data)\n{\n    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {\n        esp_wifi_connect();\n    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {\n        if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {\n            esp_wifi_connect();\n            s_retry_num++;\n            ESP_LOGI(TAG, \"retry to connect to the AP\");\n        } else {\n            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);\n        }\n        ESP_LOGI(TAG,\"connect to the AP fail\");\n    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {\n        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;\n        ESP_LOGI(TAG, \"got ip:\" IPSTR, IP2STR(&event->ip_info.ip));\n        s_retry_num = 0;\n        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);\n    }\n}\n\nvoid wifi_init_sta(void)\n{\n    s_wifi_event_group = xEventGroupCreate();\n\n    ESP_ERROR_CHECK(esp_netif_init());\n\n    ESP_ERROR_CHECK(esp_event_loop_create_default());\n    esp_netif_create_default_wifi_sta();\n\n    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();\n    ESP_ERROR_CHECK(esp_wifi_init(&cfg));\n\n    esp_event_handler_instance_t instance_any_id;\n    esp_event_handler_instance_t instance_got_ip;\n    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,\n                                                        ESP_EVENT_ANY_ID,",
+    "tags": [
+      "esp32",
+      "wifi",
+      "station",
+      "networking",
+      "event-loop",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 WiFi Station Mode — part 3/4",
+    "description": "(continued) ESP_ERROR_CHECK(esp_event_loop_create_default());",
+    "code": "ESP_ERROR_CHECK(esp_event_loop_create_default());\n    esp_netif_create_default_wifi_sta();\n\n    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();\n    ESP_ERROR_CHECK(esp_wifi_init(&cfg));\n\n    esp_event_handler_instance_t instance_any_id;\n    esp_event_handler_instance_t instance_got_ip;\n    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,\n                                                        ESP_EVENT_ANY_ID,\n                                                        &event_handler,\n                                                        NULL,\n                                                        &instance_any_id));\n    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,\n                                                        IP_EVENT_STA_GOT_IP,\n                                                        &event_handler,\n                                                        NULL,\n                                                        &instance_got_ip));\n\n    wifi_config_t wifi_config = {\n        .sta = {\n            .ssid = EXAMPLE_ESP_WIFI_SSID,\n            .password = EXAMPLE_ESP_WIFI_PASS,\n            /* Authmode threshold resets to WPA2 as default if auth mode threshold equals WIFI_AUTH_OPEN\n             * and password matches WPA2 standards (password len => 8).\n             * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value\n             * to WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK and set the password with length and format matching to\n             * WIFI_AUTH_WEP/WIFI_AUTH_WPA_PSK standards.\n             */\n            .threshold.authmode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD,\n            .sae_pwe_h2e = ESP_WIFI_SAE_MODE,\n            .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,\n#ifdef CONFIG_ESP_WIFI_WPA3_COMPATIBLE_SUPPORT\n            .disable_wpa3_compatible_mode = 0,\n#endif\n        },\n    };\n    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );\n    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );\n    ESP_ERROR_CHECK(esp_wifi_start() );\n\n    ESP_LOGI(TAG, \"wifi_init_sta finished.\");\n\n    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum\n     * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */\n    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,\n            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,\n            pdFALSE,\n            pdFALSE,\n            portMAX_DELAY);\n\n    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually\n     * happened. */\n    if (bits & WIFI_CONNECTED_BIT) {\n        ESP_LOGI(TAG, \"connected to ap SSID:%s password:%s\",\n                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);\n    } else if (bits & WIFI_FAIL_BIT) {\n        ESP_LOGI(TAG, \"Failed to connect to SSID:%s, password:%s\",\n                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);\n    } else {",
+    "tags": [
+      "esp32",
+      "wifi",
+      "station",
+      "networking",
+      "event-loop",
+      "esp-idf"
+    ]
+  },
+  {
+    "title": "ESP32 WiFi Station Mode — part 4/4",
+    "description": "(continued) /* xEventGroupWaitBits() returns the bits before the call returned, hence we can",
+    "code": "/* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually\n     * happened. */\n    if (bits & WIFI_CONNECTED_BIT) {\n        ESP_LOGI(TAG, \"connected to ap SSID:%s password:%s\",\n                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);\n    } else if (bits & WIFI_FAIL_BIT) {\n        ESP_LOGI(TAG, \"Failed to connect to SSID:%s, password:%s\",\n                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);\n    } else {\n        ESP_LOGE(TAG, \"UNEXPECTED EVENT\");\n    }\n}\n\nvoid app_main(void)\n{\n    //Initialize NVS\n    esp_err_t ret = nvs_flash_init();\n    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {\n      ESP_ERROR_CHECK(nvs_flash_erase());\n      ret = nvs_flash_init();\n    }\n    ESP_ERROR_CHECK(ret);\n\n    if (CONFIG_LOG_MAXIMUM_LEVEL > CONFIG_LOG_DEFAULT_LEVEL) {\n        /* If you only want to open more logs in the wifi module, you need to make the max level greater than the default level,\n         * and call esp_log_level_set() before esp_wifi_init() to improve the log level of the wifi module. */\n        esp_log_level_set(\"wifi\", CONFIG_LOG_MAXIMUM_LEVEL);\n    }\n\n    ESP_LOGI(TAG, \"ESP_WIFI_MODE_STA\");\n    wifi_init_sta();\n}",
+    "tags": [
+      "esp32",
+      "wifi",
+      "station",
+      "networking",
+      "event-loop",
+      "esp-idf"
+    ]
+  }
+]

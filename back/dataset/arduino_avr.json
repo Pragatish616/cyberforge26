@@ -1,0 +1,498 @@
+[
+  {
+    "title": "Arduino AVR Main Entry Point",
+    "description": "Arduino AVR runtime entry: calls init() for hardware setup, invokes setup() once, then loops calling loop() forever.",
+    "code": "/*\n  main.cpp - Main loop for Arduino sketches\n  Copyright (c) 2005-2013 Arduino Team.  All right reserved.\n\n  This library is free software; you can redistribute it and/or\n  modify it under the terms of the GNU Lesser General Public\n  License as published by the Free Software Foundation; either\n  version 2.1 of the License, or (at your option) any later version.\n\n  This library is distributed in the hope that it will be useful,\n  but WITHOUT ANY WARRANTY; without even the implied warranty of\n  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU\n  Lesser General Public License for more details.\n\n  You should have received a copy of the GNU Lesser General Public\n  License along with this library; if not, write to the Free Software\n  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA\n*/\n\n#include <Arduino.h>\n\n// Declared weak in Arduino.h to allow user redefinitions.\nint atexit(void (* /*func*/ )()) { return 0; }\n\n// Weak empty variant initialization function.\n// May be redefined by variant files.\nvoid initVariant() __attribute__((weak));\nvoid initVariant() { }\n\nvoid setupUSB() __attribute__((weak));\nvoid setupUSB() { }\n\nint main(void)\n{\n\tinit();\n\n\tinitVariant();\n\n#if defined(USBCON)\n\tUSBDevice.attach();\n#endif\n\t\n\tsetup();\n    \n\tfor (;;) {\n\t\tloop();\n\t\tif (serialEventRun) serialEventRun();\n\t}\n        \n\treturn 0;\n}\n\n",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "main",
+      "runtime",
+      "setup",
+      "loop"
+    ]
+  },
+  {
+    "title": "Arduino Hardware Serial Driver — part 1/6",
+    "description": "Interrupt-driven UART driver for ATmega with TX/RX ring buffers, baud rate calculation, and Serial.print support.",
+    "code": "/*\n  HardwareSerial.cpp - Hardware serial library for Wiring\n  Copyright (c) 2006 Nicholas Zambetti.  All right reserved.\n\n  This library is free software; you can redistribute it and/or\n  modify it under the terms of the GNU Lesser General Public\n  License as published by the Free Software Foundation; either\n  version 2.1 of the License, or (at your option) any later version.\n\n  This library is distributed in the hope that it will be useful,\n  but WITHOUT ANY WARRANTY; without even the implied warranty of\n  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU\n  Lesser General Public License for more details.\n\n  You should have received a copy of the GNU Lesser General Public\n  License along with this library; if not, write to the Free Software\n  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA\n  \n  Modified 23 November 2006 by David A. Mellis\n  Modified 28 September 2010 by Mark Sproul\n  Modified 14 August 2012 by Alarus\n  Modified 3 December 2013 by Matthijs Kooijman\n*/\n\n#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>\n#include <inttypes.h>\n#include <util/atomic.h>\n#include \"Arduino.h\"\n\n#include \"HardwareSerial.h\"\n#include \"HardwareSerial_private.h\"\n\n// this next line disables the entire HardwareSerial.cpp, \n// this is so I can support Attiny series and any other chip without a uart\n#if defined(HAVE_HWSERIAL0) || defined(HAVE_HWSERIAL1) || defined(HAVE_HWSERIAL2) || defined(HAVE_HWSERIAL3)\n\n// SerialEvent functions are weak, so when the user doesn't define them,\n// the linker just sets their address to 0 (which is checked below).\n// The Serialx_available is just a wrapper around Serialx.available(),\n// but we can refer to it weakly so we don't pull in the entire\n// HardwareSerial instance if the user doesn't also refer to it.\n#if defined(HAVE_HWSERIAL0)\n  void serialEvent() __attribute__((weak));\n  bool Serial0_available() __attribute__((weak));\n#endif\n\n#if defined(HAVE_HWSERIAL1)\n  void serialEvent1() __attribute__((weak));\n  bool Serial1_available() __attribute__((weak));\n#endif\n\n#if defined(HAVE_HWSERIAL2)\n  void serialEvent2() __attribute__((weak));\n  bool Serial2_available() __attribute__((weak));\n#endif\n\n#if defined(HAVE_HWSERIAL3)\n  void serialEvent3() __attribute__((weak));",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "uart",
+      "serial",
+      "interrupt",
+      "ring-buffer",
+      "driver"
+    ]
+  },
+  {
+    "title": "Arduino Hardware Serial Driver — part 2/6",
+    "description": "(continued) bool Serial1_available() __attribute__((weak));",
+    "code": "bool Serial1_available() __attribute__((weak));\n#endif\n\n#if defined(HAVE_HWSERIAL2)\n  void serialEvent2() __attribute__((weak));\n  bool Serial2_available() __attribute__((weak));\n#endif\n\n#if defined(HAVE_HWSERIAL3)\n  void serialEvent3() __attribute__((weak));\n  bool Serial3_available() __attribute__((weak));\n#endif\n\nvoid serialEventRun(void)\n{\n#if defined(HAVE_HWSERIAL0)\n  if (Serial0_available && serialEvent && Serial0_available()) serialEvent();\n#endif\n#if defined(HAVE_HWSERIAL1)\n  if (Serial1_available && serialEvent1 && Serial1_available()) serialEvent1();\n#endif\n#if defined(HAVE_HWSERIAL2)\n  if (Serial2_available && serialEvent2 && Serial2_available()) serialEvent2();\n#endif\n#if defined(HAVE_HWSERIAL3)\n  if (Serial3_available && serialEvent3 && Serial3_available()) serialEvent3();\n#endif\n}\n\n// macro to guard critical sections when needed for large TX buffer sizes\n#if (SERIAL_TX_BUFFER_SIZE>256)\n#define TX_BUFFER_ATOMIC ATOMIC_BLOCK(ATOMIC_RESTORESTATE)\n#else\n#define TX_BUFFER_ATOMIC\n#endif\n\n// Actual interrupt handlers //////////////////////////////////////////////////////////////\n\nvoid HardwareSerial::_tx_udr_empty_irq(void)\n{\n  // If interrupts are enabled, there must be more data in the output\n  // buffer. Send the next byte\n  unsigned char c = _tx_buffer[_tx_buffer_tail];\n  _tx_buffer_tail = (_tx_buffer_tail + 1) % SERIAL_TX_BUFFER_SIZE;\n\n  *_udr = c;\n\n  // clear the TXC bit -- \"can be cleared by writing a one to its bit\n  // location\". This makes sure flush() won't return until the bytes\n  // actually got written. Other r/w bits are preserved, and zeroes\n  // written to the rest.\n\n#ifdef MPCM0\n  *_ucsra = ((*_ucsra) & ((1 << U2X0) | (1 << MPCM0))) | (1 << TXC0);\n#else\n  *_ucsra = ((*_ucsra) & ((1 << U2X0) | (1 << TXC0)));\n#endif\n\n  if (_tx_buffer_head == _tx_buffer_tail) {\n    // Buffer empty, so disable interrupts",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "uart",
+      "serial",
+      "interrupt",
+      "ring-buffer",
+      "driver"
+    ]
+  },
+  {
+    "title": "Arduino Hardware Serial Driver — part 3/6",
+    "description": "(continued) // written to the rest.",
+    "code": "// written to the rest.\n\n#ifdef MPCM0\n  *_ucsra = ((*_ucsra) & ((1 << U2X0) | (1 << MPCM0))) | (1 << TXC0);\n#else\n  *_ucsra = ((*_ucsra) & ((1 << U2X0) | (1 << TXC0)));\n#endif\n\n  if (_tx_buffer_head == _tx_buffer_tail) {\n    // Buffer empty, so disable interrupts\n    cbi(*_ucsrb, UDRIE0);\n  }\n}\n\n// Public Methods //////////////////////////////////////////////////////////////\n\nvoid HardwareSerial::begin(unsigned long baud, byte config)\n{\n  // Try u2x mode first\n  uint16_t baud_setting = (F_CPU / 4 / baud - 1) / 2;\n  *_ucsra = 1 << U2X0;\n\n  // hardcoded exception for 57600 for compatibility with the bootloader\n  // shipped with the Duemilanove and previous boards and the firmware\n  // on the 8U2 on the Uno and Mega 2560. Also, The baud_setting cannot\n  // be > 4095, so switch back to non-u2x mode if the baud rate is too\n  // low.\n  if (((F_CPU == 16000000UL) && (baud == 57600)) || (baud_setting >4095))\n  {\n    *_ucsra = 0;\n    baud_setting = (F_CPU / 8 / baud - 1) / 2;\n  }\n\n  // assign the baud_setting, a.k.a. ubrr (USART Baud Rate Register)\n  *_ubrrh = baud_setting >> 8;\n  *_ubrrl = baud_setting;\n\n  _written = false;\n\n  //set the data bits, parity, and stop bits\n#if defined(__AVR_ATmega8__)\n  config |= 0x80; // select UCSRC register (shared with UBRRH)\n#endif\n  *_ucsrc = config;\n  \n  sbi(*_ucsrb, RXEN0);\n  sbi(*_ucsrb, TXEN0);\n  sbi(*_ucsrb, RXCIE0);\n  cbi(*_ucsrb, UDRIE0);\n}\n\nvoid HardwareSerial::end()\n{\n  // wait for transmission of outgoing data\n  flush();\n\n  cbi(*_ucsrb, RXEN0);\n  cbi(*_ucsrb, TXEN0);\n  cbi(*_ucsrb, RXCIE0);\n  cbi(*_ucsrb, UDRIE0);",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "uart",
+      "serial",
+      "interrupt",
+      "ring-buffer",
+      "driver"
+    ]
+  },
+  {
+    "title": "Arduino Hardware Serial Driver — part 4/6",
+    "description": "(continued) void HardwareSerial::end()",
+    "code": "void HardwareSerial::end()\n{\n  // wait for transmission of outgoing data\n  flush();\n\n  cbi(*_ucsrb, RXEN0);\n  cbi(*_ucsrb, TXEN0);\n  cbi(*_ucsrb, RXCIE0);\n  cbi(*_ucsrb, UDRIE0);\n  \n  // clear any received data\n  _rx_buffer_head = _rx_buffer_tail;\n}\n\nint HardwareSerial::available(void)\n{\n  return ((unsigned int)(SERIAL_RX_BUFFER_SIZE + _rx_buffer_head - _rx_buffer_tail)) % SERIAL_RX_BUFFER_SIZE;\n}\n\nint HardwareSerial::peek(void)\n{\n  if (_rx_buffer_head == _rx_buffer_tail) {\n    return -1;\n  } else {\n    return _rx_buffer[_rx_buffer_tail];\n  }\n}\n\nint HardwareSerial::read(void)\n{\n  // if the head isn't ahead of the tail, we don't have any characters\n  if (_rx_buffer_head == _rx_buffer_tail) {\n    return -1;\n  } else {\n    unsigned char c = _rx_buffer[_rx_buffer_tail];\n    _rx_buffer_tail = (rx_buffer_index_t)(_rx_buffer_tail + 1) % SERIAL_RX_BUFFER_SIZE;\n    return c;\n  }\n}\n\nint HardwareSerial::availableForWrite(void)\n{\n  tx_buffer_index_t head;\n  tx_buffer_index_t tail;\n\n  TX_BUFFER_ATOMIC {\n    head = _tx_buffer_head;\n    tail = _tx_buffer_tail;\n  }\n  if (head >= tail) return SERIAL_TX_BUFFER_SIZE - 1 - head + tail;\n  return tail - head - 1;\n}\n\nvoid HardwareSerial::flush()\n{\n  // If we have never written a byte, no need to flush. This special\n  // case is needed since there is no way to force the TXC (transmit\n  // complete) bit to 1 during initialization\n  if (!_written)",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "uart",
+      "serial",
+      "interrupt",
+      "ring-buffer",
+      "driver"
+    ]
+  },
+  {
+    "title": "Arduino Hardware Serial Driver — part 5/6",
+    "description": "(continued) if (head >= tail) return SERIAL_TX_BUFFER_SIZE - 1 - head + tail;",
+    "code": "if (head >= tail) return SERIAL_TX_BUFFER_SIZE - 1 - head + tail;\n  return tail - head - 1;\n}\n\nvoid HardwareSerial::flush()\n{\n  // If we have never written a byte, no need to flush. This special\n  // case is needed since there is no way to force the TXC (transmit\n  // complete) bit to 1 during initialization\n  if (!_written)\n    return;\n\n  while (bit_is_set(*_ucsrb, UDRIE0) || bit_is_clear(*_ucsra, TXC0)) {\n    if (bit_is_clear(SREG, SREG_I) && bit_is_set(*_ucsrb, UDRIE0))\n\t// Interrupts are globally disabled, but the DR empty\n\t// interrupt should be enabled, so poll the DR empty flag to\n\t// prevent deadlock\n\tif (bit_is_set(*_ucsra, UDRE0))\n\t  _tx_udr_empty_irq();\n  }\n  // If we get here, nothing is queued anymore (DRIE is disabled) and\n  // the hardware finished transmission (TXC is set).\n}\n\nsize_t HardwareSerial::write(uint8_t c)\n{\n  _written = true;\n  // If the buffer and the data register is empty, just write the byte\n  // to the data register and be done. This shortcut helps\n  // significantly improve the effective datarate at high (>\n  // 500kbit/s) bitrates, where interrupt overhead becomes a slowdown.\n  if (_tx_buffer_head == _tx_buffer_tail && bit_is_set(*_ucsra, UDRE0)) {\n    // If TXC is cleared before writing UDR and the previous byte\n    // completes before writing to UDR, TXC will be set but a byte\n    // is still being transmitted causing flush() to return too soon.\n    // So writing UDR must happen first.\n    // Writing UDR and clearing TC must be done atomically, otherwise\n    // interrupts might delay the TXC clear so the byte written to UDR\n    // is transmitted (setting TXC) before clearing TXC. Then TXC will\n    // be cleared when no bytes are left, causing flush() to hang\n    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {\n      *_udr = c;\n#ifdef MPCM0\n      *_ucsra = ((*_ucsra) & ((1 << U2X0) | (1 << MPCM0))) | (1 << TXC0);\n#else\n      *_ucsra = ((*_ucsra) & ((1 << U2X0) | (1 << TXC0)));\n#endif\n    }\n    return 1;\n  }\n  tx_buffer_index_t i = (_tx_buffer_head + 1) % SERIAL_TX_BUFFER_SIZE;\n\t\n  // If the output buffer is full, there's nothing for it other than to \n  // wait for the interrupt handler to empty it a bit\n  while (i == _tx_buffer_tail) {\n    if (bit_is_clear(SREG, SREG_I)) {\n      // Interrupts are disabled, so we'll have to poll the data\n      // register empty flag ourselves. If it is set, pretend an\n      // interrupt has happened and call the handler to free up\n      // space for us.",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "uart",
+      "serial",
+      "interrupt",
+      "ring-buffer",
+      "driver"
+    ]
+  },
+  {
+    "title": "Arduino Hardware Serial Driver — part 6/6",
+    "description": "(continued) tx_buffer_index_t i = (_tx_buffer_head + 1) % SERIAL_TX_BUFFER_SIZE;",
+    "code": "tx_buffer_index_t i = (_tx_buffer_head + 1) % SERIAL_TX_BUFFER_SIZE;\n\t\n  // If the output buffer is full, there's nothing for it other than to \n  // wait for the interrupt handler to empty it a bit\n  while (i == _tx_buffer_tail) {\n    if (bit_is_clear(SREG, SREG_I)) {\n      // Interrupts are disabled, so we'll have to poll the data\n      // register empty flag ourselves. If it is set, pretend an\n      // interrupt has happened and call the handler to free up\n      // space for us.\n      if(bit_is_set(*_ucsra, UDRE0))\n\t_tx_udr_empty_irq();\n    } else {\n      // nop, the interrupt handler will free up space for us\n    }\n  }\n\n  _tx_buffer[_tx_buffer_head] = c;\n\n  // make atomic to prevent execution of ISR between setting the\n  // head pointer and setting the interrupt flag resulting in buffer\n  // retransmission\n  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {\n    _tx_buffer_head = i;\n    sbi(*_ucsrb, UDRIE0);\n  }\n  \n  return 1;\n}\n\n#endif // whole file",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "uart",
+      "serial",
+      "interrupt",
+      "ring-buffer",
+      "driver"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 1/13",
+    "description": "Generates square-wave tones on any Arduino pin using AVR timer interrupts with frequency and duration control.",
+    "code": "/* Tone.cpp\n\n  A Tone Generator Library\n\n  Written by Brett Hagman\n\n  This library is free software; you can redistribute it and/or\n  modify it under the terms of the GNU Lesser General Public\n  License as published by the Free Software Foundation; either\n  version 2.1 of the License, or (at your option) any later version.\n\n  This library is distributed in the hope that it will be useful,\n  but WITHOUT ANY WARRANTY; without even the implied warranty of\n  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU\n  Lesser General Public License for more details.\n\n  You should have received a copy of the GNU Lesser General Public\n  License along with this library; if not, write to the Free Software\n  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA\n\nVersion Modified By Date     Comments\n------- ----------- -------- --------\n0001    B Hagman    09/08/02 Initial coding\n0002    B Hagman    09/08/18 Multiple pins\n0003    B Hagman    09/08/18 Moved initialization from constructor to begin()\n0004    B Hagman    09/09/26 Fixed problems with ATmega8\n0005    B Hagman    09/11/23 Scanned prescalars for best fit on 8 bit timers\n                    09/11/25 Changed pin toggle method to XOR\n                    09/11/25 Fixed timer0 from being excluded\n0006    D Mellis    09/12/29 Replaced objects with functions\n0007    M Sproul    10/08/29 Changed #ifdefs from cpu to register\n0008    S Kanemoto  12/06/22 Fixed for Leonardo by @maris_HY\n0009    J Reucker   15/04/10 Issue #292 Fixed problems with ATmega8 (thanks to Pete62)\n0010    jipp        15/04/13 added additional define check #2923\n*************************************************/\n\n#include <avr/interrupt.h>\n#include <avr/pgmspace.h>\n#include \"Arduino.h\"\n#include \"pins_arduino.h\"\n\n#if defined(__AVR_ATmega8__) || defined(__AVR_ATmega128__)\n#define TCCR2A TCCR2\n#define TCCR2B TCCR2\n#define COM2A1 COM21\n#define COM2A0 COM20\n#define OCR2A OCR2\n#define TIMSK2 TIMSK\n#define OCIE2A OCIE2\n#define TIMER2_COMPA_vect TIMER2_COMP_vect\n#define TIMSK1 TIMSK\n#endif\n\n// timerx_toggle_count:\n//  > 0 - duration specified\n//  = 0 - stopped\n//  < 0 - infinitely (until stop() method called, or new play() called)\n\n#if !defined(__AVR_ATmega8__)\nvolatile long timer0_toggle_count;",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 2/13",
+    "description": "(continued) #define TIMSK1 TIMSK",
+    "code": "#define TIMSK1 TIMSK\n#endif\n\n// timerx_toggle_count:\n//  > 0 - duration specified\n//  = 0 - stopped\n//  < 0 - infinitely (until stop() method called, or new play() called)\n\n#if !defined(__AVR_ATmega8__)\nvolatile long timer0_toggle_count;\nvolatile uint8_t *timer0_pin_port;\nvolatile uint8_t timer0_pin_mask;\n#endif\n\nvolatile long timer1_toggle_count;\nvolatile uint8_t *timer1_pin_port;\nvolatile uint8_t timer1_pin_mask;\nvolatile long timer2_toggle_count;\nvolatile uint8_t *timer2_pin_port;\nvolatile uint8_t timer2_pin_mask;\n\n#if defined(TIMSK3)\nvolatile long timer3_toggle_count;\nvolatile uint8_t *timer3_pin_port;\nvolatile uint8_t timer3_pin_mask;\n#endif\n\n#if defined(TIMSK4)\nvolatile long timer4_toggle_count;\nvolatile uint8_t *timer4_pin_port;\nvolatile uint8_t timer4_pin_mask;\n#endif\n\n#if defined(TIMSK5)\nvolatile long timer5_toggle_count;\nvolatile uint8_t *timer5_pin_port;\nvolatile uint8_t timer5_pin_mask;\n#endif\n\n\n#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)\n\n#define AVAILABLE_TONE_PINS 1\n#define USE_TIMER2\n\nconst uint8_t PROGMEM tone_pin_to_timer_PGM[] = { 2 /*, 3, 4, 5, 1, 0 */ };\nstatic uint8_t tone_pins[AVAILABLE_TONE_PINS] = { 255 /*, 255, 255, 255, 255, 255 */ };\n\n#elif defined(__AVR_ATmega8__)\n\n#define AVAILABLE_TONE_PINS 1\n#define USE_TIMER2\n\nconst uint8_t PROGMEM tone_pin_to_timer_PGM[] = { 2 /*, 1 */ };\nstatic uint8_t tone_pins[AVAILABLE_TONE_PINS] = { 255 /*, 255 */ };\n\n#elif defined(__AVR_ATmega32U4__)\n \n#define AVAILABLE_TONE_PINS 1\n#define USE_TIMER3",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 3/13",
+    "description": "(continued) #define AVAILABLE_TONE_PINS 1",
+    "code": "#define AVAILABLE_TONE_PINS 1\n#define USE_TIMER2\n\nconst uint8_t PROGMEM tone_pin_to_timer_PGM[] = { 2 /*, 1 */ };\nstatic uint8_t tone_pins[AVAILABLE_TONE_PINS] = { 255 /*, 255 */ };\n\n#elif defined(__AVR_ATmega32U4__)\n \n#define AVAILABLE_TONE_PINS 1\n#define USE_TIMER3\n \nconst uint8_t PROGMEM tone_pin_to_timer_PGM[] = { 3 /*, 1 */ };\nstatic uint8_t tone_pins[AVAILABLE_TONE_PINS] = { 255 /*, 255 */ };\n \n#else\n\n#define AVAILABLE_TONE_PINS 1\n#define USE_TIMER2\n\n// Leave timer 0 to last.\nconst uint8_t PROGMEM tone_pin_to_timer_PGM[] = { 2 /*, 1, 0 */ };\nstatic uint8_t tone_pins[AVAILABLE_TONE_PINS] = { 255 /*, 255, 255 */ };\n\n#endif\n\n\n\nstatic int8_t toneBegin(uint8_t _pin)\n{\n  int8_t _timer = -1;\n\n  // if we're already using the pin, the timer should be configured.  \n  for (int i = 0; i < AVAILABLE_TONE_PINS; i++) {\n    if (tone_pins[i] == _pin) {\n      return pgm_read_byte(tone_pin_to_timer_PGM + i);\n    }\n  }\n  \n  // search for an unused timer.\n  for (int i = 0; i < AVAILABLE_TONE_PINS; i++) {\n    if (tone_pins[i] == 255) {\n      tone_pins[i] = _pin;\n      _timer = pgm_read_byte(tone_pin_to_timer_PGM + i);\n      break;\n    }\n  }\n  \n  if (_timer != -1)\n  {\n    // Set timer specific stuff\n    // All timers in CTC mode\n    // 8 bit timers will require changing prescalar values,\n    // whereas 16 bit timers are set to either ck/1 or ck/64 prescalar\n    switch (_timer)\n    {\n      #if defined(TCCR0A) && defined(TCCR0B) && defined(WGM01)\n      case 0:\n        // 8 bit timer\n        TCCR0A = 0;\n        TCCR0B = 0;",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 4/13",
+    "description": "(continued) // All timers in CTC mode",
+    "code": "// All timers in CTC mode\n    // 8 bit timers will require changing prescalar values,\n    // whereas 16 bit timers are set to either ck/1 or ck/64 prescalar\n    switch (_timer)\n    {\n      #if defined(TCCR0A) && defined(TCCR0B) && defined(WGM01)\n      case 0:\n        // 8 bit timer\n        TCCR0A = 0;\n        TCCR0B = 0;\n        bitWrite(TCCR0A, WGM01, 1);\n        bitWrite(TCCR0B, CS00, 1);\n        timer0_pin_port = portOutputRegister(digitalPinToPort(_pin));\n        timer0_pin_mask = digitalPinToBitMask(_pin);\n        break;\n      #endif\n\n      #if defined(TCCR1A) && defined(TCCR1B) && defined(WGM12)\n      case 1:\n        // 16 bit timer\n        TCCR1A = 0;\n        TCCR1B = 0;\n        bitWrite(TCCR1B, WGM12, 1);\n        bitWrite(TCCR1B, CS10, 1);\n        timer1_pin_port = portOutputRegister(digitalPinToPort(_pin));\n        timer1_pin_mask = digitalPinToBitMask(_pin);\n        break;\n      #endif\n\n      #if defined(TCCR2A) && defined(TCCR2B)\n      case 2:\n        // 8 bit timer\n        TCCR2A = 0;\n        TCCR2B = 0;\n        bitWrite(TCCR2A, WGM21, 1);\n        bitWrite(TCCR2B, CS20, 1);\n        timer2_pin_port = portOutputRegister(digitalPinToPort(_pin));\n        timer2_pin_mask = digitalPinToBitMask(_pin);\n        break;\n      #endif\n\n      #if defined(TCCR3A) && defined(TCCR3B) &&  defined(TIMSK3)\n      case 3:\n        // 16 bit timer\n        TCCR3A = 0;\n        TCCR3B = 0;\n        bitWrite(TCCR3B, WGM32, 1);\n        bitWrite(TCCR3B, CS30, 1);\n        timer3_pin_port = portOutputRegister(digitalPinToPort(_pin));\n        timer3_pin_mask = digitalPinToBitMask(_pin);\n        break;\n      #endif\n\n      #if defined(TCCR4A) && defined(TCCR4B) &&  defined(TIMSK4)\n      case 4:\n        // 16 bit timer\n        TCCR4A = 0;\n        TCCR4B = 0;\n        #if defined(WGM42)\n          bitWrite(TCCR4B, WGM42, 1);",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 5/13",
+    "description": "(continued) break;",
+    "code": "break;\n      #endif\n\n      #if defined(TCCR4A) && defined(TCCR4B) &&  defined(TIMSK4)\n      case 4:\n        // 16 bit timer\n        TCCR4A = 0;\n        TCCR4B = 0;\n        #if defined(WGM42)\n          bitWrite(TCCR4B, WGM42, 1);\n        #elif defined(CS43)\n          // TODO this may not be correct\n          // atmega32u4\n          bitWrite(TCCR4B, CS43, 1);\n        #endif\n        bitWrite(TCCR4B, CS40, 1);\n        timer4_pin_port = portOutputRegister(digitalPinToPort(_pin));\n        timer4_pin_mask = digitalPinToBitMask(_pin);\n        break;\n      #endif\n\n      #if defined(TCCR5A) && defined(TCCR5B) &&  defined(TIMSK5)\n      case 5:\n        // 16 bit timer\n        TCCR5A = 0;\n        TCCR5B = 0;\n        bitWrite(TCCR5B, WGM52, 1);\n        bitWrite(TCCR5B, CS50, 1);\n        timer5_pin_port = portOutputRegister(digitalPinToPort(_pin));\n        timer5_pin_mask = digitalPinToBitMask(_pin);\n        break;\n      #endif\n    }\n  }\n\n  return _timer;\n}\n\n\n\n// frequency (in hertz) and duration (in milliseconds).\n\nvoid tone(uint8_t _pin, unsigned int frequency, unsigned long duration)\n{\n  uint8_t prescalarbits = 0b001;\n  long toggle_count = 0;\n  uint32_t ocr = 0;\n  int8_t _timer;\n\n  _timer = toneBegin(_pin);\n\n  if (_timer >= 0)\n  {\n    // Set the pinMode as OUTPUT\n    pinMode(_pin, OUTPUT);\n    \n    // if we are using an 8 bit timer, scan through prescalars to find the best fit\n    if (_timer == 0 || _timer == 2)\n    {\n      ocr = F_CPU / frequency / 2 - 1;",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 6/13",
+    "description": "(continued) if (_timer >= 0)",
+    "code": "if (_timer >= 0)\n  {\n    // Set the pinMode as OUTPUT\n    pinMode(_pin, OUTPUT);\n    \n    // if we are using an 8 bit timer, scan through prescalars to find the best fit\n    if (_timer == 0 || _timer == 2)\n    {\n      ocr = F_CPU / frequency / 2 - 1;\n      prescalarbits = 0b001;  // ck/1: same for both timers\n      if (ocr > 255)\n      {\n        ocr = F_CPU / frequency / 2 / 8 - 1;\n        prescalarbits = 0b010;  // ck/8: same for both timers\n\n        if (_timer == 2 && ocr > 255)\n        {\n          ocr = F_CPU / frequency / 2 / 32 - 1;\n          prescalarbits = 0b011;\n        }\n\n        if (ocr > 255)\n        {\n          ocr = F_CPU / frequency / 2 / 64 - 1;\n          prescalarbits = _timer == 0 ? 0b011 : 0b100;\n\n          if (_timer == 2 && ocr > 255)\n          {\n            ocr = F_CPU / frequency / 2 / 128 - 1;\n            prescalarbits = 0b101;\n          }\n\n          if (ocr > 255)\n          {\n            ocr = F_CPU / frequency / 2 / 256 - 1;\n            prescalarbits = _timer == 0 ? 0b100 : 0b110;\n            if (ocr > 255)\n            {\n              // can't do any better than /1024\n              ocr = F_CPU / frequency / 2 / 1024 - 1;\n              prescalarbits = _timer == 0 ? 0b101 : 0b111;\n            }\n          }\n        }\n      }\n\n#if defined(TCCR0B)\n      if (_timer == 0)\n      {\n        TCCR0B = (TCCR0B & 0b11111000) | prescalarbits;\n      }\n      else\n#endif\n#if defined(TCCR2B)\n      {\n        TCCR2B = (TCCR2B & 0b11111000) | prescalarbits;\n      }\n#else\n      {",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 7/13",
+    "description": "(continued) TCCR0B = (TCCR0B & 0b11111000) | prescalarbits;",
+    "code": "TCCR0B = (TCCR0B & 0b11111000) | prescalarbits;\n      }\n      else\n#endif\n#if defined(TCCR2B)\n      {\n        TCCR2B = (TCCR2B & 0b11111000) | prescalarbits;\n      }\n#else\n      {\n        // dummy place holder to make the above ifdefs work\n      }\n#endif\n    }\n    else\n    {\n      // two choices for the 16 bit timers: ck/1 or ck/64\n      ocr = F_CPU / frequency / 2 - 1;\n\n      prescalarbits = 0b001;\n      if (ocr > 0xffff)\n      {\n        ocr = F_CPU / frequency / 2 / 64 - 1;\n        prescalarbits = 0b011;\n      }\n\n      if (_timer == 1)\n      {\n#if defined(TCCR1B)\n        TCCR1B = (TCCR1B & 0b11111000) | prescalarbits;\n#endif\n      }\n#if defined(TCCR3B)\n      else if (_timer == 3)\n        TCCR3B = (TCCR3B & 0b11111000) | prescalarbits;\n#endif\n#if defined(TCCR4B)\n      else if (_timer == 4)\n        TCCR4B = (TCCR4B & 0b11111000) | prescalarbits;\n#endif\n#if defined(TCCR5B)\n      else if (_timer == 5)\n        TCCR5B = (TCCR5B & 0b11111000) | prescalarbits;\n#endif\n\n    }\n    \n\n    // Calculate the toggle count\n    if (duration > 0)\n    {\n      toggle_count = 2 * frequency * duration / 1000;\n    }\n    else\n    {\n      toggle_count = -1;\n    }\n\n    // Set the OCR for the given timer,\n    // set the toggle count,",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 8/13",
+    "description": "(continued) {",
+    "code": "{\n      toggle_count = 2 * frequency * duration / 1000;\n    }\n    else\n    {\n      toggle_count = -1;\n    }\n\n    // Set the OCR for the given timer,\n    // set the toggle count,\n    // then turn on the interrupts\n    switch (_timer)\n    {\n\n#if defined(OCR0A) && defined(TIMSK0) && defined(OCIE0A)\n      case 0:\n        OCR0A = ocr;\n        timer0_toggle_count = toggle_count;\n        bitWrite(TIMSK0, OCIE0A, 1);\n        break;\n#endif\n\n      case 1:\n#if defined(OCR1A) && defined(TIMSK1) && defined(OCIE1A)\n        OCR1A = ocr;\n        timer1_toggle_count = toggle_count;\n        bitWrite(TIMSK1, OCIE1A, 1);\n#elif defined(OCR1A) && defined(TIMSK) && defined(OCIE1A)\n        // this combination is for at least the ATmega32\n        OCR1A = ocr;\n        timer1_toggle_count = toggle_count;\n        bitWrite(TIMSK, OCIE1A, 1);\n#endif\n        break;\n\n#if defined(OCR2A) && defined(TIMSK2) && defined(OCIE2A)\n      case 2:\n        OCR2A = ocr;\n        timer2_toggle_count = toggle_count;\n        bitWrite(TIMSK2, OCIE2A, 1);\n        break;\n#endif\n\n#if defined(OCR3A) && defined(TIMSK3) && defined(OCIE3A)\n      case 3:\n        OCR3A = ocr;\n        timer3_toggle_count = toggle_count;\n        bitWrite(TIMSK3, OCIE3A, 1);\n        break;\n#endif\n\n#if defined(OCR4A) && defined(TIMSK4) && defined(OCIE4A)\n      case 4:\n        OCR4A = ocr;\n        timer4_toggle_count = toggle_count;\n        bitWrite(TIMSK4, OCIE4A, 1);\n        break;\n#endif\n\n#if defined(OCR5A) && defined(TIMSK5) && defined(OCIE5A)",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 9/13",
+    "description": "(continued) #if defined(OCR4A) && defined(TIMSK4) && defined(OCIE4A)",
+    "code": "#if defined(OCR4A) && defined(TIMSK4) && defined(OCIE4A)\n      case 4:\n        OCR4A = ocr;\n        timer4_toggle_count = toggle_count;\n        bitWrite(TIMSK4, OCIE4A, 1);\n        break;\n#endif\n\n#if defined(OCR5A) && defined(TIMSK5) && defined(OCIE5A)\n      case 5:\n        OCR5A = ocr;\n        timer5_toggle_count = toggle_count;\n        bitWrite(TIMSK5, OCIE5A, 1);\n        break;\n#endif\n\n    }\n  }\n}\n\n\n// XXX: this function only works properly for timer 2 (the only one we use\n// currently).  for the others, it should end the tone, but won't restore\n// proper PWM functionality for the timer.\nvoid disableTimer(uint8_t _timer)\n{\n  switch (_timer)\n  {\n    case 0:\n      #if defined(TIMSK0)\n        TIMSK0 = 0;\n      #elif defined(TIMSK)\n        TIMSK = 0; // atmega32\n      #endif\n      break;\n\n#if defined(TIMSK1) && defined(OCIE1A)\n    case 1:\n      bitWrite(TIMSK1, OCIE1A, 0);\n      break;\n#endif\n\n    case 2:\n      #if defined(TIMSK2) && defined(OCIE2A)\n        bitWrite(TIMSK2, OCIE2A, 0); // disable interrupt\n      #endif\n      #if defined(TCCR2A) && defined(WGM20)\n        TCCR2A = (1 << WGM20);\n      #endif\n      #if defined(TCCR2B) && defined(CS22)\n        TCCR2B = (TCCR2B & 0b11111000) | (1 << CS22);\n      #endif\n      #if defined(OCR2A)\n        OCR2A = 0;\n      #endif\n      break;\n\n#if defined(TIMSK3) && defined(OCIE3A)\n    case 3:",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 10/13",
+    "description": "(continued) #if defined(TCCR2B) && defined(CS22)",
+    "code": "#if defined(TCCR2B) && defined(CS22)\n        TCCR2B = (TCCR2B & 0b11111000) | (1 << CS22);\n      #endif\n      #if defined(OCR2A)\n        OCR2A = 0;\n      #endif\n      break;\n\n#if defined(TIMSK3) && defined(OCIE3A)\n    case 3:\n      bitWrite(TIMSK3, OCIE3A, 0);\n      break;\n#endif\n\n#if defined(TIMSK4) && defined(OCIE4A)\n    case 4:\n      bitWrite(TIMSK4, OCIE4A, 0);\n      break;\n#endif\n\n#if defined(TIMSK5) && defined(OCIE5A)\n    case 5:\n      bitWrite(TIMSK5, OCIE5A, 0);\n      break;\n#endif\n  }\n}\n\n\nvoid noTone(uint8_t _pin)\n{\n  int8_t _timer = -1;\n  \n  for (int i = 0; i < AVAILABLE_TONE_PINS; i++) {\n    if (tone_pins[i] == _pin) {\n      _timer = pgm_read_byte(tone_pin_to_timer_PGM + i);\n      tone_pins[i] = 255;\n      break;\n    }\n  }\n  \n  disableTimer(_timer);\n\n  digitalWrite(_pin, 0);\n}\n\n#ifdef USE_TIMER0\nISR(TIMER0_COMPA_vect)\n{\n  if (timer0_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer0_pin_port ^= timer0_pin_mask;\n\n    if (timer0_toggle_count > 0)\n      timer0_toggle_count--;\n  }\n  else\n  {\n    disableTimer(0);",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 11/13",
+    "description": "(continued) {",
+    "code": "{\n    // toggle the pin\n    *timer0_pin_port ^= timer0_pin_mask;\n\n    if (timer0_toggle_count > 0)\n      timer0_toggle_count--;\n  }\n  else\n  {\n    disableTimer(0);\n    *timer0_pin_port &= ~(timer0_pin_mask);  // keep pin low after stop\n  }\n}\n#endif\n\n\n#ifdef USE_TIMER1\nISR(TIMER1_COMPA_vect)\n{\n  if (timer1_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer1_pin_port ^= timer1_pin_mask;\n\n    if (timer1_toggle_count > 0)\n      timer1_toggle_count--;\n  }\n  else\n  {\n    disableTimer(1);\n    *timer1_pin_port &= ~(timer1_pin_mask);  // keep pin low after stop\n  }\n}\n#endif\n\n\n#ifdef USE_TIMER2\nISR(TIMER2_COMPA_vect)\n{\n\n  if (timer2_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer2_pin_port ^= timer2_pin_mask;\n\n    if (timer2_toggle_count > 0)\n      timer2_toggle_count--;\n  }\n  else\n  {\n    // need to call noTone() so that the tone_pins[] entry is reset, so the\n    // timer gets initialized next time we call tone().\n    // XXX: this assumes timer 2 is always the first one used.\n    noTone(tone_pins[0]);\n//    disableTimer(2);\n//    *timer2_pin_port &= ~(timer2_pin_mask);  // keep pin low after stop\n  }\n}\n#endif",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 12/13",
+    "description": "(continued) // need to call noTone() so that the tone_pins[] entry is reset, so the",
+    "code": "// need to call noTone() so that the tone_pins[] entry is reset, so the\n    // timer gets initialized next time we call tone().\n    // XXX: this assumes timer 2 is always the first one used.\n    noTone(tone_pins[0]);\n//    disableTimer(2);\n//    *timer2_pin_port &= ~(timer2_pin_mask);  // keep pin low after stop\n  }\n}\n#endif\n\n\n#ifdef USE_TIMER3\nISR(TIMER3_COMPA_vect)\n{\n  if (timer3_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer3_pin_port ^= timer3_pin_mask;\n\n    if (timer3_toggle_count > 0)\n      timer3_toggle_count--;\n  }\n  else\n  {\n    disableTimer(3);\n    *timer3_pin_port &= ~(timer3_pin_mask);  // keep pin low after stop\n  }\n}\n#endif\n\n\n#ifdef USE_TIMER4\nISR(TIMER4_COMPA_vect)\n{\n  if (timer4_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer4_pin_port ^= timer4_pin_mask;\n\n    if (timer4_toggle_count > 0)\n      timer4_toggle_count--;\n  }\n  else\n  {\n    disableTimer(4);\n    *timer4_pin_port &= ~(timer4_pin_mask);  // keep pin low after stop\n  }\n}\n#endif\n\n\n#ifdef USE_TIMER5\nISR(TIMER5_COMPA_vect)\n{\n  if (timer5_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer5_pin_port ^= timer5_pin_mask;\n\n    if (timer5_toggle_count > 0)",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino Tone / PWM Generator — part 13/13",
+    "description": "(continued) #ifdef USE_TIMER5",
+    "code": "#ifdef USE_TIMER5\nISR(TIMER5_COMPA_vect)\n{\n  if (timer5_toggle_count != 0)\n  {\n    // toggle the pin\n    *timer5_pin_port ^= timer5_pin_mask;\n\n    if (timer5_toggle_count > 0)\n      timer5_toggle_count--;\n  }\n  else\n  {\n    disableTimer(5);\n    *timer5_pin_port &= ~(timer5_pin_mask);  // keep pin low after stop\n  }\n}\n#endif",
+    "tags": [
+      "arduino",
+      "avr",
+      "atmega",
+      "tone",
+      "pwm",
+      "timer",
+      "interrupt",
+      "audio",
+      "isr"
+    ]
+  },
+  {
+    "title": "Arduino SPI Library — part 1/5",
+    "description": "Full-duplex SPI master driver for Arduino/AVR with configurable clock divider, bit order, and SPI mode settings.",
+    "code": "/*\n * Copyright (c) 2010 by Cristian Maglie <c.maglie@arduino.cc>\n * Copyright (c) 2014 by Paul Stoffregen <paul@pjrc.com> (Transaction API)\n * Copyright (c) 2014 by Matthijs Kooijman <matthijs@stdin.nl> (SPISettings AVR)\n * Copyright (c) 2014 by Andrew J. Kroll <xxxajk@gmail.com> (atomicity fixes)\n * SPI Master library for arduino.\n *\n * This file is free software; you can redistribute it and/or modify\n * it under the terms of either the GNU General Public License version 2\n * or the GNU Lesser General Public License version 2.1, both as\n * published by the Free Software Foundation.\n */\n\n#include \"SPI.h\"\n\nSPIClass SPI;\n\nuint8_t SPIClass::initialized = 0;\nuint8_t SPIClass::interruptMode = 0;\nuint8_t SPIClass::interruptMask = 0;\nuint8_t SPIClass::interruptSave = 0;\n#ifdef SPI_TRANSACTION_MISMATCH_LED\nuint8_t SPIClass::inTransactionFlag = 0;\n#endif\n\nvoid SPIClass::begin()\n{\n  uint8_t sreg = SREG;\n  noInterrupts(); // Protect from a scheduler and prevent transactionBegin\n  if (!initialized) {\n    // Set SS to high so a connected chip will be \"deselected\" by default\n    uint8_t port = digitalPinToPort(SS);\n    uint8_t bit = digitalPinToBitMask(SS);\n    volatile uint8_t *reg = portModeRegister(port);\n\n    // if the SS pin is not already configured as an output\n    // then set it high (to enable the internal pull-up resistor)\n    if(!(*reg & bit)){\n      digitalWrite(SS, HIGH);\n    }\n\n    // When the SS pin is set as OUTPUT, it can be used as\n    // a general purpose output port (it doesn't influence\n    // SPI operations).\n    pinMode(SS, OUTPUT);\n\n    // Warning: if the SS pin ever becomes a LOW INPUT then SPI\n    // automatically switches to Slave, so the data direction of\n    // the SS pin MUST be kept as OUTPUT.\n    SPCR |= _BV(MSTR);\n    SPCR |= _BV(SPE);\n\n    // Set direction register for SCK and MOSI pin.\n    // MISO pin automatically overrides to INPUT.\n    // By doing this AFTER enabling SPI, we avoid accidentally\n    // clocking in a single bit since the lines go directly\n    // from \"input\" to SPI control.\n    // http://code.google.com/p/arduino/issues/detail?id=888\n    pinMode(SCK, OUTPUT);\n    pinMode(MOSI, OUTPUT);",
+    "tags": [
+      "arduino",
+      "avr",
+      "spi",
+      "master",
+      "driver",
+      "clock",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino SPI Library — part 2/5",
+    "description": "(continued) SPCR |= _BV(SPE);",
+    "code": "SPCR |= _BV(SPE);\n\n    // Set direction register for SCK and MOSI pin.\n    // MISO pin automatically overrides to INPUT.\n    // By doing this AFTER enabling SPI, we avoid accidentally\n    // clocking in a single bit since the lines go directly\n    // from \"input\" to SPI control.\n    // http://code.google.com/p/arduino/issues/detail?id=888\n    pinMode(SCK, OUTPUT);\n    pinMode(MOSI, OUTPUT);\n  }\n  initialized++; // reference count\n  SREG = sreg;\n}\n\nvoid SPIClass::end() {\n  uint8_t sreg = SREG;\n  noInterrupts(); // Protect from a scheduler and prevent transactionBegin\n  // Decrease the reference counter\n  if (initialized)\n    initialized--;\n  // If there are no more references disable SPI\n  if (!initialized) {\n    SPCR &= ~_BV(SPE);\n    interruptMode = 0;\n    #ifdef SPI_TRANSACTION_MISMATCH_LED\n    inTransactionFlag = 0;\n    #endif\n  }\n  SREG = sreg;\n}\n\n// mapping of interrupt numbers to bits within SPI_AVR_EIMSK\n#if defined(__AVR_ATmega32U4__)\n  #define SPI_INT0_MASK  (1<<INT0)\n  #define SPI_INT1_MASK  (1<<INT1)\n  #define SPI_INT2_MASK  (1<<INT2)\n  #define SPI_INT3_MASK  (1<<INT3)\n  #define SPI_INT4_MASK  (1<<INT6)\n#elif defined(__AVR_AT90USB646__) || defined(__AVR_AT90USB1286__)\n  #define SPI_INT0_MASK  (1<<INT0)\n  #define SPI_INT1_MASK  (1<<INT1)\n  #define SPI_INT2_MASK  (1<<INT2)\n  #define SPI_INT3_MASK  (1<<INT3)\n  #define SPI_INT4_MASK  (1<<INT4)\n  #define SPI_INT5_MASK  (1<<INT5)\n  #define SPI_INT6_MASK  (1<<INT6)\n  #define SPI_INT7_MASK  (1<<INT7)\n#elif defined(EICRA) && defined(EICRB) && defined(EIMSK)\n  #define SPI_INT0_MASK  (1<<INT4)\n  #define SPI_INT1_MASK  (1<<INT5)\n  #define SPI_INT2_MASK  (1<<INT0)\n  #define SPI_INT3_MASK  (1<<INT1)\n  #define SPI_INT4_MASK  (1<<INT2)\n  #define SPI_INT5_MASK  (1<<INT3)\n  #define SPI_INT6_MASK  (1<<INT6)\n  #define SPI_INT7_MASK  (1<<INT7)\n#else\n  #ifdef INT0\n  #define SPI_INT0_MASK  (1<<INT0)",
+    "tags": [
+      "arduino",
+      "avr",
+      "spi",
+      "master",
+      "driver",
+      "clock",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino SPI Library — part 3/5",
+    "description": "(continued) #define SPI_INT1_MASK  (1<<INT5)",
+    "code": "#define SPI_INT1_MASK  (1<<INT5)\n  #define SPI_INT2_MASK  (1<<INT0)\n  #define SPI_INT3_MASK  (1<<INT1)\n  #define SPI_INT4_MASK  (1<<INT2)\n  #define SPI_INT5_MASK  (1<<INT3)\n  #define SPI_INT6_MASK  (1<<INT6)\n  #define SPI_INT7_MASK  (1<<INT7)\n#else\n  #ifdef INT0\n  #define SPI_INT0_MASK  (1<<INT0)\n  #endif\n  #ifdef INT1\n  #define SPI_INT1_MASK  (1<<INT1)\n  #endif\n  #ifdef INT2\n  #define SPI_INT2_MASK  (1<<INT2)\n  #endif\n#endif\n\nvoid SPIClass::usingInterrupt(uint8_t interruptNumber)\n{\n  uint8_t mask = 0;\n  uint8_t sreg = SREG;\n  noInterrupts(); // Protect from a scheduler and prevent transactionBegin\n  switch (interruptNumber) {\n  #ifdef SPI_INT0_MASK\n  case 0: mask = SPI_INT0_MASK; break;\n  #endif\n  #ifdef SPI_INT1_MASK\n  case 1: mask = SPI_INT1_MASK; break;\n  #endif\n  #ifdef SPI_INT2_MASK\n  case 2: mask = SPI_INT2_MASK; break;\n  #endif\n  #ifdef SPI_INT3_MASK\n  case 3: mask = SPI_INT3_MASK; break;\n  #endif\n  #ifdef SPI_INT4_MASK\n  case 4: mask = SPI_INT4_MASK; break;\n  #endif\n  #ifdef SPI_INT5_MASK\n  case 5: mask = SPI_INT5_MASK; break;\n  #endif\n  #ifdef SPI_INT6_MASK\n  case 6: mask = SPI_INT6_MASK; break;\n  #endif\n  #ifdef SPI_INT7_MASK\n  case 7: mask = SPI_INT7_MASK; break;\n  #endif\n  default:\n    interruptMode = 2;\n    break;\n  }\n  interruptMask |= mask;\n  if (!interruptMode)\n    interruptMode = 1;\n  SREG = sreg;\n}\n\nvoid SPIClass::notUsingInterrupt(uint8_t interruptNumber)",
+    "tags": [
+      "arduino",
+      "avr",
+      "spi",
+      "master",
+      "driver",
+      "clock",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino SPI Library — part 4/5",
+    "description": "(continued) interruptMode = 2;",
+    "code": "interruptMode = 2;\n    break;\n  }\n  interruptMask |= mask;\n  if (!interruptMode)\n    interruptMode = 1;\n  SREG = sreg;\n}\n\nvoid SPIClass::notUsingInterrupt(uint8_t interruptNumber)\n{\n  // Once in mode 2 we can't go back to 0 without a proper reference count\n  if (interruptMode == 2)\n    return;\n  uint8_t mask = 0;\n  uint8_t sreg = SREG;\n  noInterrupts(); // Protect from a scheduler and prevent transactionBegin\n  switch (interruptNumber) {\n  #ifdef SPI_INT0_MASK\n  case 0: mask = SPI_INT0_MASK; break;\n  #endif\n  #ifdef SPI_INT1_MASK\n  case 1: mask = SPI_INT1_MASK; break;\n  #endif\n  #ifdef SPI_INT2_MASK\n  case 2: mask = SPI_INT2_MASK; break;\n  #endif\n  #ifdef SPI_INT3_MASK\n  case 3: mask = SPI_INT3_MASK; break;\n  #endif\n  #ifdef SPI_INT4_MASK\n  case 4: mask = SPI_INT4_MASK; break;\n  #endif\n  #ifdef SPI_INT5_MASK\n  case 5: mask = SPI_INT5_MASK; break;\n  #endif\n  #ifdef SPI_INT6_MASK\n  case 6: mask = SPI_INT6_MASK; break;\n  #endif\n  #ifdef SPI_INT7_MASK\n  case 7: mask = SPI_INT7_MASK; break;\n  #endif\n  default:\n    break;\n    // this case can't be reached\n  }\n  interruptMask &= ~mask;\n  if (!interruptMask)\n    interruptMode = 0;\n  SREG = sreg;\n}",
+    "tags": [
+      "arduino",
+      "avr",
+      "spi",
+      "master",
+      "driver",
+      "clock",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 1/8",
+    "description": "I2C master and slave driver for AVR using the TWI hardware peripheral with buffered read/write and address scanning.",
+    "code": "/*\n  TwoWire.cpp - TWI/I2C library for Wiring & Arduino\n  Copyright (c) 2006 Nicholas Zambetti.  All right reserved.\n\n  This library is free software; you can redistribute it and/or\n  modify it under the terms of the GNU Lesser General Public\n  License as published by the Free Software Foundation; either\n  version 2.1 of the License, or (at your option) any later version.\n\n  This library is distributed in the hope that it will be useful,\n  but WITHOUT ANY WARRANTY; without even the implied warranty of\n  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU\n  Lesser General Public License for more details.\n\n  You should have received a copy of the GNU Lesser General Public\n  License along with this library; if not, write to the Free Software\n  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA\n \n  Modified 2012 by Todd Krein (todd@krein.org) to implement repeated starts\n  Modified 2017 by Chuck Todd (ctodd@cableone.net) to correct Unconfigured Slave Mode reboot\n  Modified 2020 by Greyson Christoforo (grey@christoforo.net) to implement timeouts\n*/\n\nextern \"C\" {\n  #include <stdlib.h>\n  #include <string.h>\n  #include <inttypes.h>\n  #include \"utility/twi.h\"\n}\n\n#include \"Wire.h\"\n\n// Initialize Class Variables //////////////////////////////////////////////////\n\nuint8_t TwoWire::rxBuffer[BUFFER_LENGTH];\nuint8_t TwoWire::rxBufferIndex = 0;\nuint8_t TwoWire::rxBufferLength = 0;\n\nuint8_t TwoWire::txAddress = 0;\nuint8_t TwoWire::txBuffer[BUFFER_LENGTH];\nuint8_t TwoWire::txBufferIndex = 0;\nuint8_t TwoWire::txBufferLength = 0;\n\nuint8_t TwoWire::transmitting = 0;\nvoid (*TwoWire::user_onRequest)(void);\nvoid (*TwoWire::user_onReceive)(int);\n\n// Constructors ////////////////////////////////////////////////////////////////\n\nTwoWire::TwoWire()\n{\n}\n\n// Public Methods //////////////////////////////////////////////////////////////\n\nvoid TwoWire::begin(void)\n{\n  rxBufferIndex = 0;\n  rxBufferLength = 0;",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 2/8",
+    "description": "(continued) {",
+    "code": "{\n}\n\n// Public Methods //////////////////////////////////////////////////////////////\n\nvoid TwoWire::begin(void)\n{\n  rxBufferIndex = 0;\n  rxBufferLength = 0;\n\n  txBufferIndex = 0;\n  txBufferLength = 0;\n\n  twi_init();\n  twi_attachSlaveTxEvent(onRequestService); // default callback must exist\n  twi_attachSlaveRxEvent(onReceiveService); // default callback must exist\n}\n\nvoid TwoWire::begin(uint8_t address)\n{\n  begin();\n  twi_setAddress(address);\n}\n\nvoid TwoWire::begin(int address)\n{\n  begin((uint8_t)address);\n}\n\nvoid TwoWire::end(void)\n{\n  twi_disable();\n}\n\nvoid TwoWire::setClock(uint32_t clock)\n{\n  twi_setFrequency(clock);\n}\n\n/***\n * Sets the TWI timeout.\n *\n * This limits the maximum time to wait for the TWI hardware. If more time passes, the bus is assumed\n * to have locked up (e.g. due to noise-induced glitches or faulty slaves) and the transaction is aborted.\n * Optionally, the TWI hardware is also reset, which can be required to allow subsequent transactions to\n * succeed in some cases (in particular when noise has made the TWI hardware think there is a second\n * master that has claimed the bus).\n *\n * When a timeout is triggered, a flag is set that can be queried with `getWireTimeoutFlag()` and is cleared\n * when `clearWireTimeoutFlag()` or `setWireTimeoutUs()` is called.\n *\n * Note that this timeout can also trigger while waiting for clock stretching or waiting for a second master\n * to complete its transaction. So make sure to adapt the timeout to accommodate for those cases if needed.\n * A typical timeout would be 25ms (which is the maximum clock stretching allowed by the SMBus protocol),\n * but (much) shorter values will usually also work.\n *\n * In the future, a timeout will be enabled by default, so if you require the timeout to be disabled, it is\n * recommended you disable it by default using `setWireTimeoutUs(0)`, even though that is currently\n * the default.\n *",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 3/8",
+    "description": "(continued) *",
+    "code": "*\n * Note that this timeout can also trigger while waiting for clock stretching or waiting for a second master\n * to complete its transaction. So make sure to adapt the timeout to accommodate for those cases if needed.\n * A typical timeout would be 25ms (which is the maximum clock stretching allowed by the SMBus protocol),\n * but (much) shorter values will usually also work.\n *\n * In the future, a timeout will be enabled by default, so if you require the timeout to be disabled, it is\n * recommended you disable it by default using `setWireTimeoutUs(0)`, even though that is currently\n * the default.\n *\n * @param timeout a timeout value in microseconds, if zero then timeout checking is disabled\n * @param reset_with_timeout if true then TWI interface will be automatically reset on timeout\n *                           if false then TWI interface will not be reset on timeout\n\n */\nvoid TwoWire::setWireTimeout(uint32_t timeout, bool reset_with_timeout){\n  twi_setTimeoutInMicros(timeout, reset_with_timeout);\n}\n\n/***\n * Returns the TWI timeout flag.\n *\n * @return true if timeout has occurred since the flag was last cleared.\n */\nbool TwoWire::getWireTimeoutFlag(void){\n  return(twi_manageTimeoutFlag(false));\n}\n\n/***\n * Clears the TWI timeout flag.\n */\nvoid TwoWire::clearWireTimeoutFlag(void){\n  twi_manageTimeoutFlag(true);\n}\n\nuint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity, uint32_t iaddress, uint8_t isize, uint8_t sendStop)\n{\n  if (isize > 0) {\n  // send internal address; this mode allows sending a repeated start to access\n  // some devices' internal registers. This function is executed by the hardware\n  // TWI module on other processors (for example Due's TWI_IADR and TWI_MMR registers)\n\n  beginTransmission(address);\n\n  // the maximum size of internal address is 3 bytes\n  if (isize > 3){\n    isize = 3;\n  }\n\n  // write internal register address - most significant byte first\n  while (isize-- > 0)\n    write((uint8_t)(iaddress >> (isize*8)));\n  endTransmission(false);\n  }\n\n  // clamp to buffer length\n  if(quantity > BUFFER_LENGTH){\n    quantity = BUFFER_LENGTH;\n  }\n  // perform blocking read into buffer",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 4/8",
+    "description": "(continued) while (isize-- > 0)",
+    "code": "while (isize-- > 0)\n    write((uint8_t)(iaddress >> (isize*8)));\n  endTransmission(false);\n  }\n\n  // clamp to buffer length\n  if(quantity > BUFFER_LENGTH){\n    quantity = BUFFER_LENGTH;\n  }\n  // perform blocking read into buffer\n  uint8_t read = twi_readFrom(address, rxBuffer, quantity, sendStop);\n  // set rx buffer iterator vars\n  rxBufferIndex = 0;\n  rxBufferLength = read;\n\n  return read;\n}\n\nuint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity, uint8_t sendStop) {\n\treturn requestFrom((uint8_t)address, (uint8_t)quantity, (uint32_t)0, (uint8_t)0, (uint8_t)sendStop);\n}\n\nuint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity)\n{\n  return requestFrom((uint8_t)address, (uint8_t)quantity, (uint8_t)true);\n}\n\nuint8_t TwoWire::requestFrom(int address, int quantity)\n{\n  return requestFrom((uint8_t)address, (uint8_t)quantity, (uint8_t)true);\n}\n\nuint8_t TwoWire::requestFrom(int address, int quantity, int sendStop)\n{\n  return requestFrom((uint8_t)address, (uint8_t)quantity, (uint8_t)sendStop);\n}\n\nvoid TwoWire::beginTransmission(uint8_t address)\n{\n  // indicate that we are transmitting\n  transmitting = 1;\n  // set address of targeted slave\n  txAddress = address;\n  // reset tx buffer iterator vars\n  txBufferIndex = 0;\n  txBufferLength = 0;\n}\n\nvoid TwoWire::beginTransmission(int address)\n{\n  beginTransmission((uint8_t)address);\n}\n\n//\n//\tOriginally, 'endTransmission' was an f(void) function.\n//\tIt has been modified to take one parameter indicating\n//\twhether or not a STOP should be performed on the bus.\n//\tCalling endTransmission(false) allows a sketch to \n//\tperform a repeated start. \n//",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 5/8",
+    "description": "(continued) beginTransmission((uint8_t)address);",
+    "code": "beginTransmission((uint8_t)address);\n}\n\n//\n//\tOriginally, 'endTransmission' was an f(void) function.\n//\tIt has been modified to take one parameter indicating\n//\twhether or not a STOP should be performed on the bus.\n//\tCalling endTransmission(false) allows a sketch to \n//\tperform a repeated start. \n//\n//\tWARNING: Nothing in the library keeps track of whether\n//\tthe bus tenure has been properly ended with a STOP. It\n//\tis very possible to leave the bus in a hung state if\n//\tno call to endTransmission(true) is made. Some I2C\n//\tdevices will behave oddly if they do not see a STOP.\n//\nuint8_t TwoWire::endTransmission(uint8_t sendStop)\n{\n  // transmit buffer (blocking)\n  uint8_t ret = twi_writeTo(txAddress, txBuffer, txBufferLength, 1, sendStop);\n  // reset tx buffer iterator vars\n  txBufferIndex = 0;\n  txBufferLength = 0;\n  // indicate that we are done transmitting\n  transmitting = 0;\n  return ret;\n}\n\n//\tThis provides backwards compatibility with the original\n//\tdefinition, and expected behaviour, of endTransmission\n//\nuint8_t TwoWire::endTransmission(void)\n{\n  return endTransmission(true);\n}\n\n// must be called in:\n// slave tx event callback\n// or after beginTransmission(address)\nsize_t TwoWire::write(uint8_t data)\n{\n  if(transmitting){\n  // in master transmitter mode\n    // don't bother if buffer is full\n    if(txBufferLength >= BUFFER_LENGTH){\n      setWriteError();\n      return 0;\n    }\n    // put byte in tx buffer\n    txBuffer[txBufferIndex] = data;\n    ++txBufferIndex;\n    // update amount in buffer   \n    txBufferLength = txBufferIndex;\n  }else{\n  // in slave send mode\n    // reply to master\n    twi_transmit(&data, 1);\n  }\n  return 1;\n}",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 6/8",
+    "description": "(continued) ++txBufferIndex;",
+    "code": "++txBufferIndex;\n    // update amount in buffer   \n    txBufferLength = txBufferIndex;\n  }else{\n  // in slave send mode\n    // reply to master\n    twi_transmit(&data, 1);\n  }\n  return 1;\n}\n\n// must be called in:\n// slave tx event callback\n// or after beginTransmission(address)\nsize_t TwoWire::write(const uint8_t *data, size_t quantity)\n{\n  if(transmitting){\n  // in master transmitter mode\n    for(size_t i = 0; i < quantity; ++i){\n      write(data[i]);\n    }\n  }else{\n  // in slave send mode\n    // reply to master\n    twi_transmit(data, quantity);\n  }\n  return quantity;\n}\n\n// must be called in:\n// slave rx event callback\n// or after requestFrom(address, numBytes)\nint TwoWire::available(void)\n{\n  return rxBufferLength - rxBufferIndex;\n}\n\n// must be called in:\n// slave rx event callback\n// or after requestFrom(address, numBytes)\nint TwoWire::read(void)\n{\n  int value = -1;\n  \n  // get each successive byte on each call\n  if(rxBufferIndex < rxBufferLength){\n    value = rxBuffer[rxBufferIndex];\n    ++rxBufferIndex;\n  }\n\n  return value;\n}\n\n// must be called in:\n// slave rx event callback\n// or after requestFrom(address, numBytes)\nint TwoWire::peek(void)\n{\n  int value = -1;",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 7/8",
+    "description": "(continued) return value;",
+    "code": "return value;\n}\n\n// must be called in:\n// slave rx event callback\n// or after requestFrom(address, numBytes)\nint TwoWire::peek(void)\n{\n  int value = -1;\n  \n  if(rxBufferIndex < rxBufferLength){\n    value = rxBuffer[rxBufferIndex];\n  }\n\n  return value;\n}\n\nvoid TwoWire::flush(void)\n{\n  // XXX: to be implemented.\n}\n\n// behind the scenes function that is called when data is received\nvoid TwoWire::onReceiveService(uint8_t* inBytes, int numBytes)\n{\n  // don't bother if user hasn't registered a callback\n  if(!user_onReceive){\n    return;\n  }\n  // don't bother if rx buffer is in use by a master requestFrom() op\n  // i know this drops data, but it allows for slight stupidity\n  // meaning, they may not have read all the master requestFrom() data yet\n  if(rxBufferIndex < rxBufferLength){\n    return;\n  }\n  // copy twi rx buffer into local read buffer\n  // this enables new reads to happen in parallel\n  for(uint8_t i = 0; i < numBytes; ++i){\n    rxBuffer[i] = inBytes[i];    \n  }\n  // set rx iterator vars\n  rxBufferIndex = 0;\n  rxBufferLength = numBytes;\n  // alert user program\n  user_onReceive(numBytes);\n}\n\n// behind the scenes function that is called when data is requested\nvoid TwoWire::onRequestService(void)\n{\n  // don't bother if user hasn't registered a callback\n  if(!user_onRequest){\n    return;\n  }\n  // reset tx buffer iterator vars\n  // !!! this will kill any pending pre-master sendTo() activity\n  txBufferIndex = 0;\n  txBufferLength = 0;\n  // alert user program\n  user_onRequest();",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  },
+  {
+    "title": "Arduino Wire I2C Library — part 8/8",
+    "description": "(continued) // don't bother if user hasn't registered a callback",
+    "code": "// don't bother if user hasn't registered a callback\n  if(!user_onRequest){\n    return;\n  }\n  // reset tx buffer iterator vars\n  // !!! this will kill any pending pre-master sendTo() activity\n  txBufferIndex = 0;\n  txBufferLength = 0;\n  // alert user program\n  user_onRequest();\n}\n\n// sets function called on slave write\nvoid TwoWire::onReceive( void (*function)(int) )\n{\n  user_onReceive = function;\n}\n\n// sets function called on slave read\nvoid TwoWire::onRequest( void (*function)(void) )\n{\n  user_onRequest = function;\n}\n\n// Preinstantiate Objects //////////////////////////////////////////////////////\n\nTwoWire Wire = TwoWire();",
+    "tags": [
+      "arduino",
+      "avr",
+      "i2c",
+      "twi",
+      "wire",
+      "master",
+      "slave",
+      "driver",
+      "library"
+    ]
+  }
+]

@@ -1,0 +1,2366 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NexBot – AI-Assisted Embedded Firmware Generator</title>
+
+    <!-- Premium Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['"Plus Jakarta Sans"', 'system-ui', '-apple-system', 'sans-serif'],
+                        mono: ['"JetBrains Mono"', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Highlight.js for syntax highlighting -->
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/tokyo-night-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/cpp.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            background: #0a0a14;
+            overflow: hidden;
+            font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+            color: #e8e8f0;
+        }
+
+        #flow-field-canvas {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        /* ── Three.js canvas stage ── */
+        #stage {
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            width: 1920px;
+            height: 1080px;
+            transform: translate(-50%, -50%);
+            transform-origin: center center;
+            overflow: hidden;
+            /* Robot renders here; we clip it to the right portion of the screen via the UI overlay */
+            z-index: 0;
+            pointer-events: none;
+        }
+
+        #stage canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 230px;
+            min-width: 230px;
+            background: #15151f;
+            border-right: 1px solid #2a2a3a;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            z-index: 30;
+            position: relative;
+            transition: width 0.25s ease, min-width 0.25s ease, opacity 0.2s ease;
+        }
+
+        .sidebar.collapsed {
+            width: 0;
+            min-width: 0;
+            overflow: hidden;
+            opacity: 0;
+            pointer-events: none;
+            border-right: none;
+        }
+
+        /* Main area background — transparent so robot 3D model shows through clearly */
+        .main-bg {
+            background: transparent;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+        }
+
+        /* Top header bar */
+        .top-bar {
+            background: rgba(21, 21, 31, 0.75);
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+            border-bottom: 1px solid #2a2a3a;
+        }
+
+        /* Input box */
+        .input-box {
+            background: #15151f;
+            border: 1px solid #2a2a3a;
+            border-radius: 16px;
+            box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        .input-box:focus-within {
+            border-color: #a78bfa;
+            box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.18), 0 2px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        /* Saved prompts bar */
+        .saved-bar {
+            background: rgba(31, 31, 46, 0.95);
+            border: 1px solid #2a2a3a;
+            border-radius: 12px;
+        }
+
+        /* Feature cards */
+        .feat-card {
+            background: transparent;
+            border: none;
+            padding: 8px;
+            cursor: pointer;
+            border-radius: 12px;
+            transition: background 0.2s;
+            text-align: left;
+        }
+
+        .feat-card:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Nav items */
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 9px 14px;
+            border-radius: 10px;
+            color: #9a9aaf;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.18s, color 0.18s;
+            text-decoration: none;
+        }
+
+        .nav-item:hover {
+            background: rgba(124, 58, 237, 0.15);
+            color: #c4b5fd;
+        }
+
+        .nav-item.active {
+            background: rgba(124, 58, 237, 0.22);
+            color: #c4b5fd;
+            font-weight: 600;
+        }
+
+        /* Chat history items */
+        .history-item {
+            padding: 7px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #9a9aaf;
+            cursor: pointer;
+            transition: background 0.15s;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .history-item:hover {
+            background: rgba(124, 58, 237, 0.15);
+        }
+
+        .history-item.active {
+            background: rgba(124, 58, 237, 0.22);
+            color: #c4b5fd;
+            font-weight: 600;
+        }
+
+        /* Sidebar history item — flex row so title + delete button can sit side by side. */
+        .history-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .history-item-title {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .history-item-delete {
+            background: none;
+            border: none;
+            color: #6a6a82;
+            cursor: pointer;
+            padding: 3px 5px;
+            border-radius: 6px;
+            opacity: 0.55;
+            transition: opacity 0.15s, color 0.15s, background 0.15s;
+            flex-shrink: 0;
+        }
+        .history-item:hover .history-item-delete,
+        .history-item.active .history-item-delete,
+        .history-item-delete:focus { opacity: 1; }
+        .history-item-delete:hover { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+
+        /* Deeper research pill */
+        .deep-pill {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: 1.5px solid rgba(167, 139, 250, 0.5);
+            color: #c4b5fd;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            background: rgba(124, 58, 237, 0.1);
+            transition: background 0.18s;
+        }
+
+        .deep-pill:hover {
+            background: rgba(124, 58, 237, 0.22);
+        }
+
+        /* Icon action buttons in toolbar */
+        .tool-btn {
+            padding: 7px;
+            border-radius: 8px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            color: #9a9aaf;
+            transition: background 0.15s, color 0.15s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .tool-btn:hover {
+            background: rgba(124, 58, 237, 0.18);
+            color: #c4b5fd;
+        }
+
+        /* Mic button (active/filled) */
+        .mic-btn {
+            padding: 8px;
+            border-radius: 50%;
+            border: none;
+            background: #7c3aed;
+            cursor: pointer;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 8px rgba(124, 58, 237, 0.35);
+            transition: background 0.18s;
+        }
+
+        .mic-btn:hover {
+            background: #6d28d9;
+        }
+
+        /* Send button */
+        .send-btn {
+            padding: 8px 14px;
+            border-radius: 10px;
+            border: none;
+            background: #7c3aed;
+            cursor: pointer;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap:-5px;
+            transition: background 0.18s;
+        }
+
+        .send-btn:hover {
+            background: #6d28d9;
+        }
+
+        .send-btn:disabled {
+            background: #2a2a3a;
+            cursor: not-allowed;
+        }
+
+        /* Attach file button */
+        .attach-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #9a9aaf;
+            font-weight: 500;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 8px;
+            transition: background 0.15s;
+        }
+
+        .attach-btn:hover {
+            background: rgba(124, 58, 237, 0.18);
+            color: #c4b5fd;
+        }
+
+        /* Upgrade button */
+        .upgrade-btn {
+            background: #7c3aed;
+            color: #fff;
+            padding: 7px 18px;
+            border-radius: 10px;
+            border: none;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.18s;
+        }
+
+        .upgrade-btn:hover {
+            background: #6d28d9;
+        }
+
+        /* Export button */
+        .export-btn {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            border: 1px solid #2a2a3a;
+            background: transparent;
+            padding: 6px 14px;
+            border-radius: 10px;
+            font-size: 13px;
+            color: #9a9aaf;
+            font-weight: 500;
+            cursor: pointer;
+        }
+
+        .export-btn:hover {
+            color: #c4b5fd;
+            border-color: rgba(167, 139, 250, 0.5);
+        }
+
+        /* Scrollbars — slim but VISIBLE so users know the sidebar history list is scrollable */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #3a3a4f;
+            border-radius: 99px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #5a5a72;
+            background-clip: padding-box;
+            border: 2px solid transparent;
+        }
+
+        /* Firefox fallback */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: #3a3a4f transparent;
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease forwards;
+        }
+
+        @keyframes pulseGlow {
+
+            0%,
+            100% {
+                opacity: 0.7;
+                transform: scale(1);
+            }
+
+            50% {
+                opacity: 1;
+                transform: scale(1.06);
+            }
+        }
+
+        .animate-pulse-glow {
+            animation: pulseGlow 3s infinite ease-in-out;
+        }
+
+        /* Typing dots */
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            background: #7c3aed;
+            border-radius: 50%;
+            display: inline-block;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+
+        .typing-dot:nth-child(1) {
+            animation-delay: -0.32s;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: -0.16s;
+        }
+
+        @keyframes bounce {
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0);
+            }
+
+            40% {
+                transform: scale(1.0);
+            }
+        }
+
+        /* Chat message bubbles — dark theme */
+        .msg-user {
+            background: rgba(124, 58, 237, 0.22);
+            border: 1px solid rgba(167, 139, 250, 0.35);
+            color: #e9d5ff;
+            border-radius: 16px;
+            padding: 10px 16px;
+            font-size: 14px;
+            max-width: 75%;
+            margin-left: auto;
+        }
+
+        .msg-bot {
+            background: #15151f;
+            border: 1px solid #2a2a3a;
+            color: #e8e8f0;
+            border-radius: 16px;
+            padding: 16px 18px;
+            font-size: 14px;
+            width: 100%;
+            box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        /* New Chat button */
+        .new-chat-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            padding: 10px 14px;
+            border-radius: 10px;
+            background: #7c3aed;
+            color: #fff;
+            border: none;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.18s;
+        }
+
+        .new-chat-btn:hover {
+            background: #6d28d9;
+        }
+
+        /* View container — shared layout for Explore/Library/Files/History */
+        .view-panel {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            padding: 40px 32px 32px;
+            position: relative;
+        }
+
+        .view-header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 28px;
+        }
+
+        .view-header-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: rgba(124, 58, 237, 0.18);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #c4b5fd;
+        }
+
+        .view-title {
+            font-size: 24px;
+            font-weight: 800;
+            color: #e8e8f0;
+            line-height: 1.2;
+        }
+
+        .view-subtitle {
+            font-size: 13px;
+            color: #9a9aaf;
+            margin-top: 2px;
+        }
+
+        .view-back {
+            position: absolute;
+            top: 40px;
+            right: 32px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: transparent;
+            border: 1px solid #2a2a3a;
+            color: #c4b5fd;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .view-back:hover {
+            background: rgba(124, 58, 237, 0.18);
+        }
+
+        /* Card grid for landing pages */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 14px;
+            max-width: 1000px;
+            width: 100%;
+        }
+
+        .landing-card {
+            background: #15151f;
+            border: 1px solid #2a2a3a;
+            border-radius: 14px;
+            padding: 18px;
+            cursor: pointer;
+            transition: transform 0.15s, border-color 0.15s, background 0.15s;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .landing-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(167, 139, 250, 0.5);
+            background: #1a1a28;
+        }
+
+        .landing-card-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 9px;
+            background: rgba(124, 58, 237, 0.18);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #c4b5fd;
+            margin-bottom: 4px;
+        }
+
+        /* History-view card — header row holds the icon and the delete button. */
+        .landing-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .landing-card-delete {
+            background: none;
+            border: none;
+            color: #6a6a82;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 6px;
+            opacity: 0.5;
+            transition: opacity 0.15s, color 0.15s, background 0.15s;
+        }
+        .landing-card:hover .landing-card-delete,
+        .landing-card-delete:focus { opacity: 1; }
+        .landing-card-delete:hover { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+
+        .landing-card-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #e8e8f0;
+        }
+
+        .landing-card-desc {
+            font-size: 12px;
+            color: #9a9aaf;
+            line-height: 1.5;
+        }
+
+        .landing-card-tag {
+            display: inline-block;
+            font-size: 10px;
+            font-weight: 700;
+            color: #c4b5fd;
+            background: rgba(124, 58, 237, 0.18);
+            padding: 3px 8px;
+            border-radius: 6px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            align-self: flex-start;
+            margin-top: 4px;
+        }
+
+        .empty-state {
+            color: #5a5a6e;
+            font-size: 13px;
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        /* Robot 3D canvas wrapper — positioned right side behind UI */
+        #robotCanvas {
+            position: fixed;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 55%;
+            pointer-events: none;
+            z-index: 1;
+            overflow: hidden;
+        }
+    </style>
+</head>
+
+<body class="h-full relative overflow-hidden">
+
+    <!-- Flow Field Particle Background -->
+    <canvas id="flow-field-canvas"></canvas>
+
+    <!-- Three.js Canvas Container (z-0, full page) -->
+    <div id="stage"></div>
+
+    <!-- White overlay for sidebar area so it stays opaque -->
+    <div id="sidebarOverlay" style="position:fixed;left:0;top:0;width:230px;height:100%;background:#15151f;z-index:25;"></div>
+
+    <!-- Expand sidebar button (shown only when collapsed) -->
+    <button id="expandSidebarBtn" onclick="toggleSidebar()" title="Open sidebar"
+        style="display:none;position:fixed;top:14px;left:14px;z-index:35;background:#15151f;border:1px solid #2a2a3a;border-radius:8px;padding:6px;cursor:pointer;color:#9a9aaf;box-shadow:0 2px 6px rgba(0,0,0,0.4);">
+        <i data-lucide="panel-left-open" style="width:18px;height:18px;"></i>
+    </button>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!--  MAIN APP LAYOUT                                           -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <div style="position:relative;z-index:30;display:flex;height:100%;width:100%;overflow:hidden;">
+
+        <!-- ── LEFT SIDEBAR ── -->
+        <aside id="sidebar" class="sidebar" style="flex-shrink:0;">
+
+            <!-- Logo row -->
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 16px 12px;">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <div
+                        style="width:34px;height:34px;background:rgba(124,58,237,0.22);border-radius:10px;display:flex;align-items:center;justify-content:center;">
+                        <i data-lucide="cpu" style="width:18px;height:18px;color:#c4b5fd;"></i>
+                    </div>
+                    <span style="font-size:17px;font-weight:800;color:#e8e8f0;letter-spacing:-0.3px;">NexBot</span>
+                </div>
+                <button onclick="toggleSidebar()" style="background:none;border:none;cursor:pointer;color:#9a9aaf;padding:4px;" title="Collapse">
+                    <i data-lucide="panel-left-close" style="width:18px;height:18px;"></i>
+                </button>
+            </div>
+
+            <!-- New Chat button -->
+            <div style="padding:0 12px 14px;">
+                <button class="new-chat-btn" onclick="startNewChat()">
+                    <i data-lucide="plus" style="width:16px;height:16px;"></i>
+                    New chat
+                </button>
+            </div>
+
+            <!-- Search bar removed -->
+
+            <!-- Nav links -->
+            <div style="padding:0 8px;display:flex;flex-direction:column;gap:2px;">
+                <a class="nav-item active" onclick="showView('explore')" data-view="explore">
+                    <i data-lucide="compass" style="width:16px;height:16px;"></i> Explore
+                </a>
+                <a class="nav-item" onclick="showView('library')" data-view="library">
+                    <i data-lucide="library" style="width:16px;height:16px;"></i> Library
+                </a>
+                <a class="nav-item" onclick="showView('files')" data-view="files">
+                    <i data-lucide="folder" style="width:16px;height:16px;"></i> Files
+                </a>
+                <a class="nav-item" onclick="showView('history')" data-view="history">
+                    <i data-lucide="history" style="width:16px;height:16px;"></i> History
+                </a>
+            </div>
+
+            <!-- Divider -->
+            <div style="height:1px;background:#2a2a3a;margin:12px 16px;"></div>
+
+            <!-- Chat History -->
+            <div style="flex:1;overflow-y:auto;padding:0 8px;">
+                <div id="chatHistoryList"></div>
+            </div>
+
+        </aside>
+
+        <!-- ── MAIN WORKSPACE ── -->
+        <main class="main-bg"
+            style="flex:1;display:flex;flex-direction:column;height:100%;min-width:0;position:relative;overflow:hidden;">
+
+            <!-- DYNAMIC CONTENT AREA -->
+            <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative;">
+
+                <!-- WELCOME PANEL -->
+                <div id="welcomePanel"
+                    style="flex:1;overflow-y:auto;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;padding:24px 24px 140px;position:relative;">
+
+                    <!-- Chat scroll area (hidden until first message) -->
+                    <div id="chatScrollArea"
+                        style="display:none;flex:1;width:100%;max-width:760px;overflow-y:auto;padding:20px 0 24px;">
+                        <div id="messagesContainer"></div>
+                    </div>
+
+                    <!-- INPUT BOX -->
+                    <div style="width:100%;max-width:660px;">
+                        <div class="input-box" style="padding:4px 4px 6px;">
+                            <textarea id="promptTextarea" rows="1" placeholder="Ask me anything..."
+                                style="width:100%;background:transparent;border:none;outline:none;resize:none;padding:10px 14px 6px;font-size:14px;color:#e8e8f0;font-family:inherit;max-height:160px;overflow-y:auto;line-height:1.55;"
+                                oninput="autoResizeTextarea(this)"></textarea>
+
+                            <!-- Toolbar row -->
+                            <div
+                                style="display:flex;align-items:center;justify-content:space-between;padding:2px 8px 2px;">
+                                <!-- Left tools -->
+                                <div style="display:flex;align-items:center;gap:2px;">
+                                    <button class="deep-pill">
+                                        <i data-lucide="zap" style="width:13px;height:13px;"></i>
+                                        Deeper Research
+                                    </button>
+                                    <button class="tool-btn" title="Image">
+                                        <i data-lucide="image" style="width:17px;height:17px;"></i>
+                                    </button>
+                                    <button class="tool-btn" title="Ideas">
+                                        <i data-lucide="lightbulb" style="width:17px;height:17px;"></i>
+                                    </button>
+                                </div>
+                                <!-- Right tools -->
+                                <div style="display:flex;align-items:center;gap:4px;">
+                                    <button class="tool-btn" title="Copy">
+                                        <i data-lucide="copy" style="width:17px;height:17px;"></i>
+                                    </button>
+                                    <button class="tool-btn" title="Web search">
+                                        <i data-lucide="globe" style="width:17px;height:17px;"></i>
+                                    </button>
+                                    <button id="sendBtn" onclick="handleSend()" class="mic-btn" title="Send / Voice"
+                                        disabled>
+                                        <i data-lucide="mic" style="width:16px;height:16px;"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- ── EXPLORE VIEW ── -->
+                <div id="viewExplore" class="view-panel" style="display:none;">
+                    <div class="view-header">
+                        <div class="view-header-icon"><i data-lucide="compass" style="width:22px;height:22px;"></i></div>
+                        <div>
+                            <div class="view-title">Explore</div>
+                            <div class="view-subtitle">Discover featured prompts, templates, and starter projects</div>
+                        </div>
+                    </div>
+                    <button class="view-back" onclick="showWelcomeView()"><i data-lucide="arrow-left" style="width:13px;height:13px;"></i> Back to chat</button>
+                    <div class="card-grid">
+                        <div class="landing-card" onclick="selectSuggested('Blink LED using STM32')">
+                            <div class="landing-card-icon"><i data-lucide="cpu" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">Blink LED using STM32</div>
+                            <div class="landing-card-desc">Configure GPIOD Pin 12 and toggle it in the main superloop with HAL_Delay.</div>
+                            <span class="landing-card-tag">GPIO</span>
+                        </div>
+                        <div class="landing-card" onclick="selectSuggested('UART Communication')">
+                            <div class="landing-card-icon"><i data-lucide="radio" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">UART Serial Driver</div>
+                            <div class="landing-card-desc">USART2 at 115200 baud with TX/RX on PA2/PA3 using the HAL layer.</div>
+                            <span class="landing-card-tag">UART</span>
+                        </div>
+                        <div class="landing-card" onclick="selectSuggested('ADC Temperature Sensor')">
+                            <div class="landing-card-icon"><i data-lucide="thermometer" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">ADC Temperature Sensor</div>
+                            <div class="landing-card-desc">Read the internal STM32 temperature sensor on ADC1 channel 16.</div>
+                            <span class="landing-card-tag">ADC</span>
+                        </div>
+                        <div class="landing-card" onclick="selectSuggested('PWM Servo Motor')">
+                            <div class="landing-card-icon"><i data-lucide="sliders" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">PWM Servo Motor</div>
+                            <div class="landing-card-desc">Generate a 50Hz PWM signal on TIM3 channel 1 to drive an SG90 servo.</div>
+                            <span class="landing-card-tag">PWM</span>
+                        </div>
+                        <div class="landing-card" onclick="selectSuggested('I2C LCD Display')">
+                            <div class="landing-card-icon"><i data-lucide="monitor-smartphone" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">I2C LCD Display</div>
+                            <div class="landing-card-desc">Initialize a 16x2 HD44780 LCD over I2C with a custom character buffer.</div>
+                            <span class="landing-card-tag">I2C</span>
+                        </div>
+                        <div class="landing-card" onclick="selectSuggested('SPI Flash Memory')">
+                            <div class="landing-card-icon"><i data-lucide="hard-drive" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">SPI Flash Memory</div>
+                            <div class="landing-card-desc">Read and write an external W25Q SPI flash with sector erase support.</div>
+                            <span class="landing-card-tag">SPI</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── LIBRARY VIEW ── -->
+                <div id="viewLibrary" class="view-panel" style="display:none;">
+                    <div class="view-header">
+                        <div class="view-header-icon"><i data-lucide="library" style="width:22px;height:22px;"></i></div>
+                        <div>
+                            <div class="view-title">Library</div>
+                            <div class="view-subtitle">Reusable code snippets, drivers, and HAL templates</div>
+                        </div>
+                    </div>
+                    <button class="view-back" onclick="showWelcomeView()"><i data-lucide="arrow-left" style="width:13px;height:13px;"></i> Back to chat</button>
+                    <div class="card-grid">
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="toggle-left" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">GPIO Helpers</div>
+                            <div class="landing-card-desc">Read, write, and toggle GPIO pins with debounce support.</div>
+                            <span class="landing-card-tag">C</span>
+                        </div>
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="waves" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">Timer Utilities</div>
+                            <div class="landing-card-desc">Microsecond delays, periodic callbacks, and PWM generation.</div>
+                            <span class="landing-card-tag">C</span>
+                        </div>
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="message-square" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">UART Ring Buffer</div>
+                            <div class="landing-card-desc">Interrupt-driven RX with a circular buffer and printf redirect.</div>
+                            <span class="landing-card-tag">C</span>
+                        </div>
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="gauge" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">ADC DMA Sampler</div>
+                            <div class="landing-card-desc">Multi-channel ADC sampling via DMA with averaging filters.</div>
+                            <span class="landing-card-tag">C</span>
+                        </div>
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="network" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">I2C Scanner</div>
+                            <div class="landing-card-desc">Detect all I2C devices on the bus and report their addresses.</div>
+                            <span class="landing-card-tag">C</span>
+                        </div>
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="shield-check" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">Watchdog Driver</div>
+                            <div class="landing-card-desc">Independent watchdog configuration with safe refresh logic.</div>
+                            <span class="landing-card-tag">C</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── FILES VIEW ── -->
+                <div id="viewFiles" class="view-panel" style="display:none;">
+                    <div class="view-header">
+                        <div class="view-header-icon"><i data-lucide="folder" style="width:22px;height:22px;"></i></div>
+                        <div>
+                            <div class="view-title">Files</div>
+                            <div class="view-subtitle">Upload, browse, and manage your firmware project files</div>
+                        </div>
+                    </div>
+                    <button class="view-back" onclick="showWelcomeView()"><i data-lucide="arrow-left" style="width:13px;height:13px;"></i> Back to chat</button>
+                    <div style="margin-bottom:18px;display:flex;gap:10px;align-items:center;">
+                        <button class="new-chat-btn" style="width:auto;padding:8px 14px;font-size:13px;">
+                            <i data-lucide="upload" style="width:14px;height:14px;"></i> Upload file
+                        </button>
+                        <button style="background:transparent;border:1px solid #2a2a3a;color:#c4b5fd;font-size:13px;font-weight:600;padding:8px 14px;border-radius:10px;cursor:pointer;display:flex;align-items:center;gap:6px;">
+                            <i data-lucide="folder-plus" style="width:14px;height:14px;"></i> New folder
+                        </button>
+                    </div>
+                    <div id="filesEmpty" class="empty-state">
+                        <i data-lucide="folder-open" style="width:36px;height:36px;color:#3a3a4a;display:block;margin:0 auto 10px;"></i>
+                        No files yet. Upload a .c, .h, or .ioc project file to get started.
+                    </div>
+                    <div class="card-grid" id="filesGrid" style="display:none;">
+                        <div class="landing-card">
+                            <div class="landing-card-icon"><i data-lucide="file-code-2" style="width:18px;height:18px;"></i></div>
+                            <div class="landing-card-title">main.c</div>
+                            <div class="landing-card-desc">Last modified just now</div>
+                            <span class="landing-card-tag">C Source</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ── HISTORY VIEW ── -->
+                <div id="viewHistory" class="view-panel" style="display:none;">
+                    <div class="view-header">
+                        <div class="view-header-icon"><i data-lucide="history" style="width:22px;height:22px;"></i></div>
+                        <div>
+                            <div class="view-title">History</div>
+                            <div class="view-subtitle">Browse and reopen your previous conversations</div>
+                        </div>
+                    </div>
+                    <button class="view-back" onclick="showWelcomeView()"><i data-lucide="arrow-left" style="width:13px;height:13px;"></i> Back to chat</button>
+                    <div id="historyEmpty" class="empty-state">
+                        <i data-lucide="message-square-dashed" style="width:36px;height:36px;color:#3a3a4a;display:block;margin:0 auto 10px;"></i>
+                        No past conversations yet. Start a chat from the home screen.
+                    </div>
+                    <div class="card-grid" id="historyGrid" style="display:none;"></div>
+                </div>
+
+            </div>
+
+            <!-- PROMPT INPUT (chat mode footer) -->
+            <footer style="padding:0;max-width:760px;width:100%;margin:0 auto;display:none;" id="chatFooter">
+                <div class="input-box" style="padding:4px 4px 6px;" id="chatInputBox" style="display:none;">
+                    <textarea id="chatPromptTextarea" rows="1" placeholder="Ask me anything..."
+                        style="width:100%;background:transparent;border:none;outline:none;resize:none;padding:10px 14px 6px;font-size:14px;color:#e8e8f0;font-family:inherit;max-height:160px;overflow-y:auto;line-height:1.55;"
+                        oninput="autoResizeChatTextarea(this)"></textarea>
+                    <div style="display:flex;align-items:center;justify-content:space-between;padding:2px 8px 2px;">
+                        <div style="display:flex;align-items:center;gap:2px;">
+                            <button class="deep-pill">
+                                <i data-lucide="zap" style="width:13px;height:13px;"></i>
+                                Deeper Research
+                            </button>
+                            <button class="tool-btn"><i data-lucide="image"
+                                    style="width:17px;height:17px;"></i></button>
+                            <button class="tool-btn"><i data-lucide="lightbulb"
+                                    style="width:17px;height:17px;"></i></button>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:4px;">
+                            <button class="tool-btn"><i data-lucide="copy" style="width:17px;height:17px;"></i></button>
+                            <button class="tool-btn"><i data-lucide="globe"
+                                    style="width:17px;height:17px;"></i></button>
+                            <button id="chatSendBtn" onclick="handleChatSend()" class="mic-btn" disabled>
+                                <i data-lucide="send" style="width:15px;height:15px;"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div id="footerNote" class="hidden"></div>
+            </footer>
+        </main>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════════════ -->
+    <!-- THREE.JS ROBOT BACKGROUND SCRIPT (UNMODIFIED)                                  -->
+    <!-- ═══════════════════════════════════════════════════════════════════════════════ -->
+    <script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.153.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.153.0/examples/jsm/"
+  }
+}
+</script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // ─── Fixed 1920×1080 render resolution ───────────────────────────────────
+        const WIDTH = 1920;
+        const HEIGHT = 1080;
+
+        // ─── Scene ────────────────────────────────────────────────────────────────
+        const scene = new THREE.Scene();
+        scene.background = null; // Transparent so CSS background image shows through
+
+        // ─── Camera (fixed — no controls, no zoom) ────────────────────────────────
+        const camera = new THREE.PerspectiveCamera(
+            35,
+            WIDTH / HEIGHT,
+            0.1,
+            1000
+        );
+        camera.position.set(0, 22, 70);
+        camera.lookAt(0, 22, 0);
+
+        // ─── Renderer ─────────────────────────────────────────────────────────────
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(1);
+        renderer.setSize(WIDTH, HEIGHT, false);
+        renderer.shadowMap.enabled = false;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+        document.getElementById('stage').appendChild(renderer.domElement);
+
+        // ─── Lighting (bright, clean studio) ──────────────────────────────────────
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+        const key = new THREE.DirectionalLight(0xffffff, 1.3);
+        key.position.set(40, 100, 80);
+        scene.add(key);
+
+        const fill = new THREE.DirectionalLight(0xeaf0ff, 0.55);
+        fill.position.set(-80, 50, 40);
+        scene.add(fill);
+
+        const rim = new THREE.DirectionalLight(0xffffff, 0.7);
+        rim.position.set(0, 60, -80);
+        scene.add(rim);
+
+        // Subtle purple accent lights only — no contrasting cyan/pink tints
+        const purpleAccent = new THREE.PointLight(0x7c6ba8, 0.40, 180, 1.5);
+        purpleAccent.position.set(50, 40, 60);
+        scene.add(purpleAccent);
+
+        const purpleAccentSide = new THREE.PointLight(0x9d8ec8, 0.25, 160, 1.8);
+        purpleAccentSide.position.set(-60, 30, 40);
+        scene.add(purpleAccentSide);
+
+        const purpleBack = new THREE.PointLight(0x6b5e8f, 0.20, 160, 1.6);
+        purpleBack.position.set(0, 50, -60);
+        scene.add(purpleBack);
+
+        // ─── Mouse tracking state ─────────────────────────────────────────────────
+        const mouse2D = new THREE.Vector2(0, 0);
+        const mouseSmooth = new THREE.Vector2(0, 0);
+        const raycaster = new THREE.Raycaster();
+
+        const trackPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        const mouseWorld = new THREE.Vector3();
+
+        const stage = document.getElementById('stage');
+        window.addEventListener('mousemove', e => {
+            const rect = stage.getBoundingClientRect();
+            const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            const y = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+            mouse2D.set(x, y);
+        });
+
+        // ─── Bone references ──────────────────────────────────────────────────────
+        let model = null;
+        let root = null;
+        let headBone = null;
+        let handLeftBone = null;
+        let handRightBone = null;
+        let headRestQuat = null;
+        let handLeftRestQuat = null;
+        let handRightRestQuat = null;
+        let rootRestQuat = null;
+        const targetHeadQuat = new THREE.Quaternion();
+        const smoothHeadQuat = new THREE.Quaternion();
+        const targetHandLeftQuat = new THREE.Quaternion();
+        const smoothHandLeftQuat = new THREE.Quaternion();
+        const targetHandRightQuat = new THREE.Quaternion();
+        const smoothHandRightQuat = new THREE.Quaternion();
+        const targetRootRot = { x: 0, y: 0, z: 0 };
+        const smoothRootRot = { x: 0, y: 0, z: 0 };
+
+        // ─── Load GLTF ────────────────────────────────────────────────────────────
+        const loader = new GLTFLoader();
+
+        loader.load(
+            'nexbot_robot_character_concept.gltf',
+
+            gltf => {
+                model = gltf.scene;
+
+                const box = new THREE.Box3().setFromObject(model);
+                const size = box.getSize(new THREE.Vector3());
+                const centre = box.getCenter(new THREE.Vector3());
+                model.position.sub(centre);
+                model.position.y += size.y / 2;
+
+                const scale = 135 / Math.max(size.x, size.y, size.z);
+                model.scale.setScalar(scale);
+
+                // ─── Material palette: harmonious muted purple-indigo tones ───────
+                // Main body — dusty indigo
+                const purpleBody = new THREE.MeshStandardMaterial({
+                    color: 0x4a4263, roughness: 0.55, metalness: 0.40, emissive: 0x14102a, emissiveIntensity: 0.08,
+                });
+                // Light lavender highlight
+                const lavenderLight = new THREE.MeshStandardMaterial({
+                    color: 0x6b6388, roughness: 0.50, metalness: 0.35, emissive: 0x1f1a36, emissiveIntensity: 0.08,
+                });
+                // Mid violet
+                const violetMid = new THREE.MeshStandardMaterial({
+                    color: 0x564b73, roughness: 0.50, metalness: 0.40, emissive: 0x181230, emissiveIntensity: 0.08,
+                });
+                // Dark joint/connector
+                const darkJoint = new THREE.MeshStandardMaterial({
+                    color: 0x1a1a2e, roughness: 0.35, metalness: 0.55,
+                });
+                // Head — same dusty indigo as body for unity (no contrasting cyan)
+                const cyanHead = new THREE.MeshStandardMaterial({
+                    color: 0x4a4263, roughness: 0.45, metalness: 0.35, emissive: 0x14102a, emissiveIntensity: 0.10,
+                });
+                // Limbs — soft warm plum (close to violet, not hot pink)
+                const pinkAccent = new THREE.MeshStandardMaterial({
+                    color: 0x6b5475, roughness: 0.50, metalness: 0.35, emissive: 0x231a30, emissiveIntensity: 0.08,
+                });
+                // Soft sage — desaturated, close to grey-purple
+                const mintAccent = new THREE.MeshStandardMaterial({
+                    color: 0x4f5a5e, roughness: 0.50, metalness: 0.35, emissive: 0x161e22, emissiveIntensity: 0.06,
+                });
+                // Eye / lens — white glow
+                const glowingEye = new THREE.MeshStandardMaterial({
+                    color: 0xffffff, roughness: 0.10, metalness: 0.20,
+                    emissive: 0xffffff, emissiveIntensity: 0.55,
+                });
+                // Logo / text on robot — muted lavender
+                const logoText = new THREE.MeshBasicMaterial({
+                    color: 0x0a0a14,
+                });
+
+                model.traverse(child => {
+                    if (child.isMesh) {
+                        const n = (child.name || '').toLowerCase();
+
+                        // Logo / text on robot — show it in bright purple so it pops against the dark theme
+                        if (n === 'logo' || n.includes('text') || n.includes('watermark') ||
+                            n.includes('nex') || n.includes('bot') || n.includes('title') ||
+                            n.includes('label') || n.includes('brand') || n.includes('word') ||
+                            n.includes('letter') || n.includes('sign')) {
+                            return;
+                        }
+
+                        const isEye =
+                            n.includes('eye') || n.includes('lens') || n.includes('screen');
+
+                        const isHeadMesh =
+                            n.includes('head') || n.includes('face') ||
+                            n.includes('visor') || n.includes('helmet') ||
+                            n.includes('skull');
+
+                        const isJoint =
+                            n.includes('joint') || n.includes('neck') ||
+                            n.includes('hinge') || n.includes('connector') ||
+                            n.includes('pelvic') || n.includes('femur') ||
+                            n.includes('shin') || n.includes('elbow') ||
+                            n.includes('shoulder') || n.includes('knee') ||
+                            n.includes('hip');
+
+                        const isLimb =
+                            n.includes('forearm') || n.includes('leg') ||
+                            n.includes('hand') || n.includes('foot') ||
+                            n.includes('arm') || n.includes('top part') ||
+                            n.includes('bottom');
+
+                        if (isEye) {
+                            child.material = glowingEye;
+                        } else if (isHeadMesh) {
+                            child.material = cyanHead;
+                        } else if (isJoint) {
+                            child.material = darkJoint;
+                        } else if (isLimb) {
+                            const hash = [...n].reduce((a, c) => a + c.charCodeAt(0), 0);
+                            // Cycle through 3 colorful accents per limb
+                            const pick = hash % 3;
+                            child.material = pick === 0 ? violetMid : pick === 1 ? pinkAccent : mintAccent;
+                        } else if (n === 'body') {
+                            child.material = purpleBody;
+                        } else if (n === 'bot') {
+                            child.material = lavenderLight;
+                        } else {
+                            const hash = [...n].reduce((a, c) => a + c.charCodeAt(0), 0);
+                            const tier = hash % 10;
+                            // Body pieces mostly purple, occasional pink/mint pop
+                            if (tier < 6) child.material = purpleBody;
+                            else if (tier < 8) child.material = violetMid;
+                            else child.material = pinkAccent;
+                        }
+                    }
+                });
+
+                // Hide logo text meshes after scale is set — keeps bounding box intact
+                model.traverse(child => {
+                    if (child.isMesh) {
+                        const n = (child.name || '').toLowerCase();
+                        if (n === 'logo' || n.includes('text') || n.includes('watermark') ||
+                            n.includes('letter') || n.includes('sign') || n.includes('label')) {
+                            child.visible = false;
+                        }
+                    }
+                    if ((child.name || '').toLowerCase() === 'logo') {
+                        child.visible = false;
+                    }
+                });
+
+                scene.add(model);
+
+                // ─── Find head bone ──────────────────────────────────────────────
+                model.traverse(child => {
+                    if (!headBone && child.name === 'Head') headBone = child;
+                });
+                if (!headBone) {
+                    model.traverse(child => {
+                        if (!headBone && child.name === 'Head 2') headBone = child;
+                    });
+                }
+                if (!headBone) {
+                    model.traverse(child => {
+                        if (!headBone && child.name && child.name.toLowerCase().includes('head')) {
+                            headBone = child;
+                        }
+                    });
+                }
+
+                if (headBone) {
+                    headBone.updateWorldMatrix(true, false);
+                    headRestQuat = headBone.quaternion.clone();
+                    smoothHeadQuat.copy(headRestQuat);
+                }
+
+                // ─── Find hand bones ───────────────────────────────────────────
+                const handCandidates = [];
+                model.traverse(child => {
+                    const cn = (child.name || '').toLowerCase();
+                    const isHand =
+                        cn === 'hand' ||
+                        cn === 'hand left' || cn === 'hand right' ||
+                        cn === 'hand_l' || cn === 'hand_r' ||
+                        cn === 'lefthand' || cn === 'righthand' ||
+                        cn === 'left hand' || cn === 'right hand';
+                    if (isHand) {
+                        child.updateWorldMatrix(true, false);
+                        const wp = new THREE.Vector3();
+                        child.getWorldPosition(wp);
+                        handCandidates.push({ node: child, x: wp.x });
+                    }
+                });
+
+                const seen = new Set();
+                const leftCands = [], rightCands = [];
+                for (const c of handCandidates) {
+                    if (seen.has(c.node)) continue;
+                    seen.add(c.node);
+                    const isWrist = c.node.isMesh || (c.node.children && c.node.children.length > 0);
+                    if (c.x < 0) leftCands.push({ ...c, isWrist });
+                    else rightCands.push({ ...c, isWrist });
+                }
+                const pickBest = arr => {
+                    const wrist = arr.find(c => c.isWrist);
+                    return wrist ? wrist.node : (arr[0] && arr[0].node);
+                };
+                if (leftCands.length) handLeftBone = pickBest(leftCands);
+                if (rightCands.length) handRightBone = pickBest(rightCands);
+
+                if (handLeftBone) {
+                    handLeftBone.updateWorldMatrix(true, false);
+                    handLeftRestQuat = handLeftBone.quaternion.clone();
+                    smoothHandLeftQuat.copy(handLeftRestQuat);
+                }
+                if (handRightBone) {
+                    handRightBone.updateWorldMatrix(true, false);
+                    handRightRestQuat = handRightBone.quaternion.clone();
+                    smoothHandRightQuat.copy(handRightRestQuat);
+                }
+
+                root = model;
+                rootRestQuat = root.quaternion.clone();
+
+                const worldCentre = new THREE.Vector3();
+                model.getWorldPosition(worldCentre);
+                trackPlane.constant = -worldCentre.z;
+
+                // ─── Find eye meshes (existing GLTF eye/lens/screen meshes) ─────
+                const foundEyeNames = [];
+                model.traverse(child => {
+                    if (!child.isMesh) return;
+                    const cn = (child.name || '').toLowerCase();
+                    if (cn.includes('eye') || cn.includes('lens') || cn.includes('screen')) {
+                        foundEyeNames.push(child.name);
+                    }
+                });
+                console.log('[NexBot] Found eye/lens/screen meshes:', foundEyeNames);
+
+                // ─── Add prominent glowing eye spheres parented to the head bone ───
+                // These follow head-tracking, always face camera, and are easy to see
+                const headForEyes = headBone || model;
+                const eyeWhiteMat = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                });
+                const eyeGlowMat = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.45,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                });
+                // Sphere radius in model-local units (model is scaled ~135x, so 0.7 ≈ 95 world units → visible but not huge)
+                const eyeRadius = 0.55;
+
+                const eyeL = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 24, 24), eyeWhiteMat);
+                const eyeR = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 24, 24), eyeWhiteMat);
+                // Position on the head — slight outward x, forward z so they face camera
+                eyeL.position.set(-1.1, 0.0, 1.2);
+                eyeR.position.set(1.1, 0.0, 1.2);
+
+                // Halo glow spheres around each eye
+                const eyeLGlow = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius * 1.6, 24, 24), eyeGlowMat.clone());
+                const eyeRGlow = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius * 1.6, 24, 24), eyeGlowMat.clone());
+                eyeLGlow.position.copy(eyeL.position);
+                eyeRGlow.position.copy(eyeR.position);
+
+                headForEyes.add(eyeL);
+                headForEyes.add(eyeR);
+                headForEyes.add(eyeLGlow);
+                headForEyes.add(eyeRGlow);
+
+                // Cache eyes (priority: GLTF eyes if any, else our added spheres)
+                window.__eyeMeshes = [];
+                if (foundEyeNames.length) {
+                    model.traverse(child => {
+                        if (!child.isMesh) return;
+                        const cn = (child.name || '').toLowerCase();
+                        if (cn.includes('eye') || cn.includes('lens') || cn.includes('screen')) {
+                            window.__eyeMeshes.push(child);
+                            if (child.material && child.material.emissive) {
+                                child.userData.baseEmissive = child.material.emissiveIntensity;
+                            } else if (child.material) {
+                                child.userData.baseEmissive = 1.0;
+                            }
+                        }
+                    });
+                }
+                // Always include our added eye spheres so blink always works
+                window.__eyeMeshes.push(eyeL, eyeR, eyeLGlow, eyeRGlow);
+                window.__eyeWhiteMeshes = [eyeL, eyeR];
+                window.__eyeGlowMeshes = [eyeLGlow, eyeRGlow];
+                window.__eyeBaseGlowOpacity = 0.45;
+
+                // Add a small white point light inside each eye for extra brightness
+                const eyeLightL = new THREE.PointLight(0xffffff, 0.6, 30, 2.0);
+                const eyeLightR = new THREE.PointLight(0xffffff, 0.6, 30, 2.0);
+                eyeLightL.position.copy(eyeL.position);
+                eyeLightR.position.copy(eyeR.position);
+                headForEyes.add(eyeLightL);
+                headForEyes.add(eyeLightR);
+                window.__eyeLights = [eyeLightL, eyeLightR];
+                window.__eyeLightBaseIntensity = 0.6;
+            },
+
+            undefined,
+
+            err => { console.error('[NexBot] model load failed:', err); }
+        );
+
+        // ─── Mouse → world position ───────────────────────────────────────────────
+        function getMouseWorldPos() {
+            raycaster.setFromCamera(mouse2D, camera);
+            const hit = new THREE.Vector3();
+            const ok = raycaster.ray.intersectPlane(trackPlane, hit);
+            return ok ? hit : null;
+        }
+
+        // ─── Per-bone "look at cursor" helper ─────────────────────────────────────
+        const _tmpDir = new THREE.Vector3();
+        const _tmpForward = new THREE.Vector3(0, 0, 1);
+        const _tmpParentQuat = new THREE.Quaternion();
+        const _tmpWorldQuat = new THREE.Quaternion();
+        function computeLookAtQuat(bone, cursor, restQuat, clamp, out) {
+            bone.updateWorldMatrix(true, false);
+            const headWorld = new THREE.Vector3();
+            bone.getWorldPosition(headWorld);
+            _tmpDir.copy(cursor).sub(headWorld);
+            if (_tmpDir.lengthSq() < 1e-6) { out.copy(restQuat); return; }
+            _tmpDir.normalize();
+            _tmpWorldQuat.setFromUnitVectors(_tmpForward, _tmpDir);
+            if (bone.parent) {
+                bone.parent.updateWorldMatrix(true, false);
+                bone.parent.getWorldQuaternion(_tmpParentQuat);
+            } else {
+                _tmpParentQuat.identity();
+            }
+            const localQuat = _tmpParentQuat.clone().invert().multiply(_tmpWorldQuat);
+            out.copy(restQuat).slerp(localQuat, clamp);
+        }
+
+        // ─── Animation loop ────────────────────────────────────────────────────────
+        const clock = new THREE.Clock();
+        let blinkTimer = 0;
+        let nextBlinkAt = 2 + Math.random() * 3; // first blink in 2–5s
+        let isBlinking = false;
+        let blinkProgress = 0;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(clock.getDelta(), 0.05);
+
+            mouseSmooth.lerp(mouse2D, Math.min(1, dt * 3));
+
+            if (headBone && headRestQuat) {
+                const target = getMouseWorldPos();
+                if (target) {
+                    computeLookAtQuat(headBone, target, headRestQuat, 0.35, targetHeadQuat);
+                }
+                smoothHeadQuat.slerp(targetHeadQuat, Math.min(1, dt * 3));
+                headBone.quaternion.copy(smoothHeadQuat);
+            }
+
+            // ─── Eye blink: dim emissive briefly every few seconds ───────────
+            if (window.__eyeMeshes && window.__eyeMeshes.length) {
+                if (!isBlinking) {
+                    blinkTimer += dt;
+                    if (blinkTimer >= nextBlinkAt) {
+                        isBlinking = true;
+                        blinkProgress = 0;
+                    }
+                } else {
+                    blinkProgress += dt;
+                    if (blinkProgress >= 0.16) {
+                        isBlinking = false;
+                        blinkTimer = 0;
+                        nextBlinkAt = 2.5 + Math.random() * 3.5;
+                    }
+                }
+                const blinkFactor = isBlinking ? 0.08 : 1.0;
+                // Dim any GLTF eye meshes by emissive intensity
+                for (const eye of window.__eyeMeshes) {
+                    if (!eye.material || !eye.material.emissive) continue;
+                    const base = eye.userData.baseEmissive || 0.45;
+                    eye.material.emissiveIntensity = base * blinkFactor;
+                }
+                // Dim our added eye spheres by opacity
+                if (window.__eyeGlowMeshes) {
+                    const baseOpacity = window.__eyeBaseGlowOpacity || 0.45;
+                    for (const g of window.__eyeGlowMeshes) {
+                        if (g && g.material) g.material.opacity = baseOpacity * blinkFactor;
+                    }
+                }
+                // Dim eye point lights
+                if (window.__eyeLights) {
+                    const baseLight = window.__eyeLightBaseIntensity || 0.6;
+                    for (const l of window.__eyeLights) {
+                        l.intensity = baseLight * blinkFactor;
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        function fitStage() {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            const scale = Math.min(w / WIDTH, h / HEIGHT);
+            stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+        }
+        fitStage();
+        window.addEventListener('resize', fitStage);
+    </script>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════════════ -->
+    <!-- CHAT CONTROLLER & STATE LOGIC SCRIPT                                            -->
+    <!-- ═══════════════════════════════════════════════════════════════════════════════ -->
+    <script>
+        lucide.createIcons();
+
+        // Backend endpoint — change this if you run uvicorn on a different host/port.
+        const BACKEND_URL = "http://localhost:8000";
+
+        let chats = [];                 // sidebar + history-view source of truth; refreshed from /history/sessions
+        let currentChatId = null;       // sidebar-active session id (UUID)
+        let currentSessionId = null;    // UUID minted on the first message of a chat; null ⇒ next message starts a new session
+        let sessionIdleTimer = null;    // debounce timer that ends a session after SESSION_IDLE_MS of inactivity
+        const SESSION_IDLE_MS = 30 * 60 * 1000;  // 30 minutes, matching ChatGPT / Claude / Gemini
+        const DRAFT_KEY = 'nexbot:draft';        // localStorage slot for the unsent textarea draft
+
+        const chatHistoryList = document.getElementById('chatHistoryList');
+        const welcomePanel = document.getElementById('welcomePanel');
+        const chatScrollArea = document.getElementById('chatScrollArea');
+        const messagesContainer = document.getElementById('messagesContainer');
+        const promptTextarea = document.getElementById('promptTextarea');
+        const sendBtn = document.getElementById('sendBtn');
+        const chatFooter = document.getElementById('chatFooter');
+        const footerNote = document.getElementById('footerNote');
+
+        // The chat mode uses the welcome textarea (we route both to handleSend)
+        // Actually we unify: the welcome textarea IS the main input; in chat mode we show chatScrollArea but still use same textarea below
+        // For simplicity: when chat is active, move the textarea into the chat footer input box area
+        // We use a single shared textarea approach:
+
+        function autoResizeTextarea(ta) {
+            ta.style.height = 'auto';
+            const sh = ta.scrollHeight;
+            ta.style.height = Math.min(sh, 160) + 'px';
+            ta.style.overflowY = sh > 160 ? 'auto' : 'hidden';
+            const hasTxt = ta.value.trim() !== '';
+            // enable/disable respective send btn
+            if (ta.id === 'promptTextarea') {
+                sendBtn.disabled = !hasTxt;
+            }
+        }
+
+        function autoResizeChatTextarea(ta) {
+            ta.style.height = 'auto';
+            const sh = ta.scrollHeight;
+            ta.style.height = Math.min(sh, 160) + 'px';
+            ta.style.overflowY = sh > 160 ? 'auto' : 'hidden';
+            document.getElementById('chatSendBtn').disabled = ta.value.trim() === '';
+        }
+
+        // ─── View router: Explore / Library / Files / History ──────────────────
+        const ALL_VIEWS = ['welcomePanel', 'viewExplore', 'viewLibrary', 'viewFiles', 'viewHistory'];
+
+        function hideAllViews() {
+            ALL_VIEWS.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = 'none';
+            });
+            document.querySelectorAll('.nav-item[data-view]').forEach(item => {
+                item.classList.remove('active');
+            });
+        }
+
+        function showWelcomeView() {
+            hideAllViews();
+            const welcome = document.getElementById('welcomePanel');
+            if (welcome) welcome.style.display = 'flex';
+            // Highlight Explore as the "home" nav item
+            const exploreNav = document.querySelector('.nav-item[data-view="explore"]');
+            if (exploreNav) exploreNav.classList.add('active');
+            lucide.createIcons();
+        }
+
+        function showView(name) {
+            hideAllViews();
+            const id = 'view' + name.charAt(0).toUpperCase() + name.slice(1);
+            const el = document.getElementById(id);
+            if (el) {
+                el.style.display = 'flex';
+                el.classList.add('animate-fade-in');
+            }
+            const navItem = document.querySelector('.nav-item[data-view="' + name + '"]');
+            if (navItem) navItem.classList.add('active');
+            // Refresh history cards when opening History view
+            if (name === 'history') renderHistoryView();
+            lucide.createIcons();
+        }
+
+        function renderHistoryView() {
+            const grid  = document.getElementById('historyGrid');
+            const empty = document.getElementById('historyEmpty');
+            if (!grid || !empty) return;
+
+            // Loading state — show the grid with a placeholder card so the user sees feedback.
+            grid.style.display = 'grid';
+            empty.style.display = 'none';
+            grid.innerHTML = `
+                <div class="landing-card" style="opacity:0.55;cursor:default;">
+                    <div class="landing-card-icon"><i data-lucide="loader" style="width:18px;height:18px;"></i></div>
+                    <div class="landing-card-title">Loading history…</div>
+                    <div class="landing-card-desc">Fetching past conversations from Supabase.</div>
+                </div>`;
+            lucide.createIcons();
+
+            fetch(BACKEND_URL + '/history/sessions')
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(data => {
+                    const sessions = (data && Array.isArray(data.sessions)) ? data.sessions : [];
+                    if (sessions.length === 0) {
+                        grid.style.display = 'none';
+                        empty.style.display = 'block';
+                        return;
+                    }
+                    empty.style.display = 'none';
+                    grid.style.display = 'grid';
+                    grid.innerHTML = '';
+                    sessions.forEach(sess => {
+                        const sid   = sess.session_id;
+                        const title = sess.title || 'Untitled';
+                        const card  = document.createElement('div');
+                        card.className = 'landing-card';
+
+                        const header = document.createElement('div');
+                        header.className = 'landing-card-header';
+
+                        const icon = document.createElement('div');
+                        icon.className = 'landing-card-icon';
+                        icon.innerHTML = '<i data-lucide="message-square" style="width:18px;height:18px;"></i>';
+
+                        const del = document.createElement('button');
+                        del.className = 'landing-card-delete';
+                        del.title = 'Delete this chat';
+                        del.setAttribute('aria-label', 'Delete this chat');
+                        del.innerHTML = '<i data-lucide="trash-2" style="width:14px;height:14px;"></i>';
+                        del.onclick = (e) => {
+                            e.stopPropagation();
+                            confirmAndDeleteChat(sid, title);
+                        };
+
+                        header.appendChild(icon);
+                        header.appendChild(del);
+
+                        const t = document.createElement('div');
+                        t.className = 'landing-card-title';
+                        t.textContent = title;
+
+                        const d = document.createElement('div');
+                        d.className = 'landing-card-desc';
+                        d.textContent = sess.preview || '';
+
+                        const tag = document.createElement('span');
+                        tag.className = 'landing-card-tag';
+                        const count  = sess.message_count || 0;
+                        const when   = sess.last_active ? new Date(sess.last_active).toLocaleString() : '';
+                        tag.textContent = `${count} msg${when ? ' · ' + when : ''}`;
+
+                        card.appendChild(header);
+                        card.appendChild(t);
+                        card.appendChild(d);
+                        card.appendChild(tag);
+                        card.onclick = () => loadChat(sid);
+                        grid.appendChild(card);
+                    });
+                    lucide.createIcons();
+                })
+                .catch(err => {
+                    grid.style.display = 'grid';
+                    empty.style.display = 'none';
+                    grid.innerHTML = `
+                        <div class="landing-card" style="cursor:default;border-color:rgba(239,68,68,0.35);">
+                            <div class="landing-card-icon"><i data-lucide="triangle-alert" style="width:18px;height:18px;color:#f87171;"></i></div>
+                            <div class="landing-card-title">Couldn't load history</div>
+                            <div class="landing-card-desc">${escapeHtml(err.message || 'Network error')}. Is the backend running on ${BACKEND_URL}?</div>
+                            <span class="landing-card-tag">retry</span>
+                        </div>`;
+                    lucide.createIcons();
+                });
+        }
+
+        async function reopenHistoryQuery(text) {
+            // Legacy helper kept for back-compat. Reopens a chat by sending a single message;
+            // prefer loadChat(session_id) for full-thread replay.
+            if (!text) return;
+            showWelcomeView();
+            const ta = document.getElementById('promptTextarea');
+            if (ta) ta.value = text;
+            await _sendMessage(text, ta);
+        }
+
+        // ── Session lifecycle ───────────────────────────────────────────────────
+        // A "chat" in NexBot is a session: every message within SESSION_IDLE_MS of the
+        // previous one shares the same session_id and lands in the same sidebar entry.
+        // After 30 minutes of inactivity the timer fires and the next message mints a new UUID.
+
+        function mintSessionId() {
+            // crypto.randomUUID is available in every evergreen browser since 2022.
+            if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+                return crypto.randomUUID();
+            }
+            // Fallback for very old browsers — RFC 4122 v4.
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = (Math.random() * 16) | 0;
+                return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+            });
+        }
+
+        function resetSessionIdleTimer() {
+            if (sessionIdleTimer) clearTimeout(sessionIdleTimer);
+            sessionIdleTimer = setTimeout(() => {
+                // Idle gap elapsed — close the session so the next message starts a new chat.
+                currentSessionId = null;
+            }, SESSION_IDLE_MS);
+        }
+
+        async function loadChatSessions() {
+            // Populate the sidebar from the backend on page load.
+            try {
+                const r = await fetch(BACKEND_URL + '/history/sessions?limit=50');
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const data = await r.json();
+                const sessions = (data && Array.isArray(data.sessions)) ? data.sessions : [];
+                chats = sessions.map(s => ({
+                    id:            s.session_id,
+                    title:         s.title || 'Untitled',
+                    message_count: s.message_count,
+                    last_active:   s.last_active,
+                    preview:       s.preview,
+                }));
+                renderHistory();
+            } catch (err) {
+                console.warn('[NexBot] loadChatSessions failed:', err.message);
+                // Leave sidebar empty — graceful degradation.
+            }
+        }
+
+        async function loadChatSession(sessionId) {
+            // Replay a session's messages into the chat panel.
+            // The backend persists the full bot reply alongside each
+            // query_history row, so we render directly — no /query replay,
+            // no cache dependency, no Gemini quota burn.
+            if (!sessionId) return;
+            currentChatId    = sessionId;
+            currentSessionId = sessionId;  // follow-ups append to this session
+            renderHistory();
+
+            showChatMode();
+            messagesContainer.innerHTML = '';
+
+            // Loading state — show a friendly placeholder while we fetch.
+            const loaderId = appendTypingIndicator();
+            const loaderTitle = messagesContainer.querySelector(`#${loaderId} .msg-bot`);
+            if (loaderTitle) {
+                loaderTitle.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:10px;color:#9a9aaf;font-size:13px;">
+                        <i data-lucide="loader" style="width:14px;height:14px;"></i>
+                        Loading conversation…
+                    </div>`;
+                lucide.createIcons();
+            }
+
+            try {
+                const r = await fetch(`${BACKEND_URL}/history/sessions/${encodeURIComponent(sessionId)}`);
+                removeTypingIndicator(loaderId);
+                if (r.status === 404) {
+                    // Session no longer exists — drop from local state and bounce to welcome.
+                    chats = chats.filter(c => c.id !== sessionId);
+                    currentChatId    = null;
+                    currentSessionId = null;
+                    renderHistory();
+                    showWelcomeView();
+                    return;
+                }
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const data = await r.json();
+                const messages = Array.isArray(data.messages) ? data.messages : [];
+
+                if (messages.length === 0) {
+                    appendMessageToDOM({
+                        sender:  'bot',
+                        title:   'This chat is empty',
+                        content: 'No messages were stored for this conversation.',
+                        code:    '',
+                    });
+                    scrollToBottom();
+                    return;
+                }
+
+                let userCount = 0;
+                let botWithContent = 0;
+                for (const m of messages) {
+                    if (m.role === 'user') {
+                        userCount++;
+                        appendMessageToDOM({ sender: 'user', content: m.content || '(empty message)' });
+                    } else {
+                        // A bot turn is "retrievable" if any of its response fields are populated.
+                        const hasContent = (m.title && m.title !== 'Generated Firmware')
+                            || (m.content && m.content.trim())
+                            || (m.code    && m.code.trim())
+                            || (m.unit_tests && m.unit_tests.trim());
+                        if (hasContent) botWithContent++;
+                        appendMessageToDOM({
+                            sender:     'bot',
+                            title:      m.title      || 'Generated Firmware',
+                            content:    m.content    || '',
+                            code:       m.code       || '',
+                            unit_tests: m.unit_tests || '',
+                            mcu_target: m.mcu_target || 'Generic',
+                            // Hint that older chats lack a stored bot reply.
+                            missing_reply: !hasContent,
+                        });
+                    }
+                    scrollToBottom();
+                }
+
+                // If the session exists but no bot replies were ever persisted
+                // (e.g. created before migration 0004), show a helpful banner.
+                if (userCount > 0 && botWithContent === 0) {
+                    const note = document.createElement('div');
+                    note.className = 'animate-fade-in';
+                    note.style.cssText = 'margin:8px 12px;padding:10px 14px;border:1px dashed #2a2a3a;border-radius:10px;font-size:12.5px;color:#9a9aaf;line-height:1.5;background:rgba(31,31,46,0.5);';
+                    note.innerHTML = `
+                        <strong style="color:#c4b5fd;">Heads up:</strong>
+                        This conversation was saved before bot replies were stored.
+                        Resend the prompt below to regenerate the code, or just type a follow-up — new replies will be saved normally.
+                    `;
+                    messagesContainer.appendChild(note);
+                    scrollToBottom();
+                }
+
+                resetSessionIdleTimer();
+            } catch (err) {
+                removeTypingIndicator(loaderId);
+                appendMessageToDOM({
+                    sender:  'bot',
+                    title:   'Could not load chat',
+                    content: `${err.message || 'Network error'}.\n\nThe backend at ${BACKEND_URL} did not respond. Make sure uvicorn is running and that migrations 0003_sessions.sql and 0004_persist_bot_response.sql were applied in Supabase.`,
+                    code:    '',
+                });
+                scrollToBottom();
+                console.error('[NexBot] loadChatSession failed:', err);
+            }
+        }
+
+        function escapeHtml(s) {
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const overlay = document.getElementById('sidebarOverlay');
+            const expandBtn = document.getElementById('expandSidebarBtn');
+            const isCollapsed = sidebar.classList.toggle('collapsed');
+            if (overlay) overlay.style.display = isCollapsed ? 'none' : 'block';
+            if (expandBtn) expandBtn.style.display = isCollapsed ? 'block' : 'none';
+            lucide.createIcons();
+        }
+
+        // ── Draft autosave ────────────────────────────────────────────────────
+        // The backend already persists every *sent* message to Supabase, so a
+        // reloaded browser always shows prior chats via /history/sessions. This
+        // buffer covers the only gap: text typed into the textarea but not yet
+        // sent (browser refresh / accidental tab close before pressing Enter).
+
+        function saveDraft() {
+            try {
+                const text = promptTextarea ? promptTextarea.value : '';
+                if (text && text.trim()) {
+                    localStorage.setItem(DRAFT_KEY, text);
+                } else {
+                    localStorage.removeItem(DRAFT_KEY);
+                }
+            } catch (_) { /* localStorage may be disabled (private mode) — silently ignore */ }
+        }
+
+        function restoreDraft() {
+            try {
+                const ta = document.getElementById('promptTextarea');
+                if (!ta) return;
+                const saved = localStorage.getItem(DRAFT_KEY);
+                if (saved && saved.trim() && !ta.value) {
+                    ta.value = saved;
+                    autoResizeTextarea(ta);
+                }
+            } catch (_) {}
+        }
+
+        function clearDraft() {
+            try { localStorage.removeItem(DRAFT_KEY); } catch (_) {}
+        }
+
+        function initApp() {
+            renderHistory();
+            // Show welcome state with proper view routing
+            showWelcomeView();
+            document.getElementById('chatInputBox').style.display = 'none';
+            footerNote.classList.add('hidden');
+            // Populate sidebar from backend so reopened browser still shows prior chats.
+            loadChatSessions();
+            // Bring back any unsent draft typed before the last close/refresh.
+            restoreDraft();
+        }
+
+        function renderHistory() {
+            chatHistoryList.innerHTML = '';
+            if (!chats || chats.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'padding:18px 14px;font-size:12px;color:#5a5a6e;text-align:center;line-height:1.5;';
+                empty.textContent = 'No conversations yet — send a message to start.';
+                chatHistoryList.appendChild(empty);
+                lucide.createIcons();
+                return;
+            }
+            chats.forEach(chat => {
+                const isSelected = chat.id === currentChatId;
+                const row = document.createElement('div');
+                row.className = 'history-item' + (isSelected ? ' active' : '');
+                row.dataset.chatId = chat.id;
+
+                const titleSpan = document.createElement('span');
+                titleSpan.className = 'history-item-title';
+                titleSpan.textContent = chat.title || 'Untitled chat';
+
+                const delBtn = document.createElement('button');
+                delBtn.className = 'history-item-delete';
+                delBtn.title = 'Delete chat';
+                delBtn.setAttribute('aria-label', 'Delete chat');
+                delBtn.innerHTML = '<i data-lucide="trash-2" style="width:14px;height:14px;"></i>';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    confirmAndDeleteChat(chat.id, chat.title);
+                };
+
+                row.appendChild(titleSpan);
+                row.appendChild(delBtn);
+                row.onclick = () => loadChat(chat.id);
+                chatHistoryList.appendChild(row);
+            });
+            lucide.createIcons();
+        }
+
+        async function confirmAndDeleteChat(chatId, title) {
+            const label = (title || 'this chat').slice(0, 60);
+            if (!confirm(`Delete "${label}"? This can't be undone.`)) return;
+            try {
+                const r = await fetch(`${BACKEND_URL}/history/sessions/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                // Drop from local state and re-render.
+                chats = chats.filter(c => c.id !== chatId);
+                if (currentChatId === chatId) {
+                    currentChatId    = null;
+                    currentSessionId = null;
+                    showWelcomeView();
+                }
+                renderHistory();
+            } catch (err) {
+                alert(`Could not delete chat: ${err.message}`);
+                console.error('[NexBot] delete chat failed:', err);
+            }
+        }
+
+        function loadChat(chatId) {
+            // Sidebar/History click handler. Replays the full thread from the backend.
+            loadChatSession(chatId);
+        }
+
+        // Backwards-compat alias used by older callers
+        function showHomeView() { showWelcomeView(); }
+
+        function showWelcome() {
+            showWelcomeView();
+            // Hide the scroll area again, restore the centered-input layout.
+            if (chatScrollArea) chatScrollArea.style.display = 'none';
+            welcomePanel.style.paddingBottom = '140px';
+            welcomePanel.style.justifyContent = 'flex-end';
+            document.getElementById('chatInputBox').style.display = 'none';
+            footerNote.classList.add('hidden');
+        }
+
+        function showChatMode() {
+            // Reveal the scroll area; keep the input box where it is.
+            chatScrollArea.style.display = 'block';
+            // Reduce the welcome panel's huge bottom padding so the chat fills the space.
+            welcomePanel.style.paddingBottom = '24px';
+            welcomePanel.style.justifyContent = 'flex-start';
+            document.getElementById('chatInputBox').style.display = 'none';
+            footerNote.classList.remove('hidden');
+            lucide.createIcons();
+        }
+
+        function selectSuggested(promptText) {
+            showWelcomeView();
+            promptTextarea.value = promptText;
+            autoResizeTextarea(promptTextarea);
+            promptTextarea.focus();
+        }
+
+        function deleteChat(chatId) {
+            chats = chats.filter(c => c.id !== chatId);
+            if (currentChatId === chatId) {
+                currentChatId = chats.length > 0 ? chats[0].id : null;
+            }
+            if (!currentChatId) startNewChat();
+            else loadChat(currentChatId);
+        }
+
+        function startNewChat() {
+            // Fresh-page behavior: clear active session, drop the previous chat thread
+            // from the DOM, and restore the centered welcome layout — identical to what
+            // the user sees on first load.
+            currentChatId    = null;
+            currentSessionId = null;
+            if (sessionIdleTimer) { clearTimeout(sessionIdleTimer); sessionIdleTimer = null; }
+
+            // Wipe the chat panel so the previous thread doesn't bleed through.
+            if (messagesContainer) messagesContainer.innerHTML = '';
+
+            // Restore the centered-input welcome layout (hides chatScrollArea,
+            // resets welcomePanel padding, hides the duplicate chat input box).
+            showWelcome();
+
+            // Reset the input box, clear the draft buffer, and refocus.
+            if (promptTextarea) {
+                promptTextarea.value = '';
+                autoResizeTextarea(promptTextarea);
+                promptTextarea.focus();
+            }
+            try { localStorage.removeItem(DRAFT_KEY); } catch (_) {}
+
+            // Drop the active highlight from any previously-selected sidebar item.
+            renderHistory();
+        }
+
+        function handleSend() {
+            const text = promptTextarea.value.trim();
+            if (!text) return;
+            if (!currentChatId) {
+                // Mint a new session UUID and create the chat entry in the sidebar.
+                const newId = mintSessionId();
+                chats.unshift({ id: newId, title: text.length > 25 ? text.slice(0, 25) + '…' : text, messages: [] });
+                currentChatId    = newId;
+                currentSessionId = newId;
+                renderHistory();
+            }
+            _sendMessage(text, promptTextarea);
+        }
+
+        function handleChatSend() {
+            const ta = document.getElementById('chatPromptTextarea');
+            const text = ta.value.trim();
+            if (!text) return;
+            _sendMessage(text, ta);
+        }
+
+        async function _sendMessage(text, textarea) {
+            const activeChat = chats.find(c => c.id === currentChatId);
+            if (!activeChat) return;
+
+            textarea.value = '';
+            autoResizeTextarea(textarea);
+            if (textarea.id === 'chatPromptTextarea') autoResizeChatTextarea(textarea);
+            // Drop the unsent-draft buffer — the message just queued will be
+            // persisted to Supabase by the backend, so we don't want to restore
+            // it on next page load.
+            clearDraft();
+
+            if (activeChat.messages.length === 0) {
+                activeChat.title = text.length > 25 ? text.slice(0, 25) + '…' : text;
+                renderHistory();
+            }
+
+            showChatMode();
+
+            const userMsg = { sender: 'user', content: text };
+            activeChat.messages.push(userMsg);
+            appendMessageToDOM(userMsg);
+            scrollToBottom();
+
+            const loaderId = appendTypingIndicator();
+            scrollToBottom();
+
+            try {
+                const resp = await fetch(`${BACKEND_URL}/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        query:      text,
+                        top_k:      5,
+                        use_cache:  true,
+                        session_id: currentSessionId,
+                    }),
+                });
+                removeTypingIndicator(loaderId);
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+                const data = await resp.json();
+                const botMsg = {
+                    sender: 'bot',
+                    title:       data.title       || 'Generated Firmware',
+                    content:     data.explanation || '',
+                    code:        data.code        || '',
+                    unit_tests:  data.unit_tests  || '',
+                    mcu_target:  data.mcu_target  || 'Generic',
+                };
+                activeChat.messages.push(botMsg);
+                appendMessageToDOM(botMsg);
+                scrollToBottom();
+                resetSessionIdleTimer();
+            } catch (err) {
+                removeTypingIndicator(loaderId);
+                const botMsg = {
+                    sender: 'bot',
+                    title:   'Backend unreachable',
+                    content: `Could not reach NexBot backend at ${BACKEND_URL}.\n\n${err.message}\n\nMake sure uvicorn is running and CORS is enabled.`,
+                    code:    '',
+                };
+                activeChat.messages.push(botMsg);
+                appendMessageToDOM(botMsg);
+                scrollToBottom();
+                console.error('[NexBot] query failed:', err);
+            }
+        }
+
+        function appendTypingIndicator() {
+            const id = 'typing_' + Date.now();
+            const div = document.createElement('div');
+            div.id = id;
+            div.className = 'animate-fade-in';
+            div.innerHTML = `
+            <div class="msg-bot" style="display:flex;align-items:center;gap:12px;">
+                <div style="width:28px;height:28px;border-radius:8px;background:rgba(124,58,237,0.22);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                    <i data-lucide="bot" style="width:14px;height:14px;color:#c4b5fd;"></i>
+                </div>
+                <div style="display:flex;align-items:center;gap:5px;">
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                </div>
+            </div>`;
+            messagesContainer.appendChild(div);
+            lucide.createIcons();
+            return id;
+        }
+
+        function removeTypingIndicator(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        function appendMessageToDOM(msg) {
+            const isBot = msg.sender === 'bot';
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'animate-fade-in';
+            msgDiv.style.display = 'flex';
+            msgDiv.style.justifyContent = isBot ? 'flex-start' : 'flex-end';
+
+            if (!isBot) {
+                msgDiv.innerHTML = `<div class="msg-user">${msg.content}</div>`;
+            } else if (msg.missing_reply) {
+                // Old session whose bot reply was never stored (pre-migration 0004).
+                // Render a small placeholder instead of an empty bubble so the
+                // thread doesn't look "unretrievable".
+                msgDiv.innerHTML = `
+                <div class="msg-bot" style="display:flex;gap:14px;align-items:flex-start;">
+                    <div style="width:30px;height:30px;border-radius:9px;background:rgba(124,58,237,0.22);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;">
+                        <i data-lucide="bot" style="width:15px;height:15px;color:#c4b5fd;"></i>
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:700;font-size:15px;color:#e8e8f0;margin-bottom:6px;">${msg.title || 'Generated Firmware'}</div>
+                        <p style="color:#8a8a9a;font-size:13px;font-style:italic;">Original reply not stored — send a follow-up to regenerate.</p>
+                    </div>
+                </div>`;
+            } else {
+                const codeId = 'code_' + Math.random().toString(36).substr(2, 9);
+                msgDiv.innerHTML = `
+                <div class="msg-bot" style="display:flex;gap:14px;align-items:flex-start;">
+                    <div style="width:30px;height:30px;border-radius:9px;background:rgba(124,58,237,0.22);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;">
+                        <i data-lucide="bot" style="width:15px;height:15px;color:#c4b5fd;"></i>
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:700;font-size:15px;color:#e8e8f0;margin-bottom:6px;">${msg.title}</div>
+                        <p style="color:#c8c8d4;line-height:1.6;font-size:13.5px;">${msg.content}</p>
+                        ${msg.code ? `
+                        <div style="margin-top:14px;border-radius:12px;overflow:hidden;border:1px solid #2a2a3a;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:#1f1f2e;border-bottom:1px solid #2a2a3a;">
+                                <span style="font-size:12px;font-weight:600;color:#c4b5fd;font-family:monospace;">c++</span>
+                                <div style="display:flex;gap:6px;">
+                                    <button onclick="copyToClipboard('${codeId}',this)" style="font-size:11px;font-weight:600;color:#c8c8d4;background:transparent;border:1px solid #2a2a3a;padding:4px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:4px;">
+                                        <i data-lucide="copy" style="width:12px;height:12px;"></i> Copy
+                                    </button>
+                                    <button onclick="downloadCode('${msg.title}','${codeId}')" style="font-size:11px;font-weight:600;color:#c8c8d4;background:transparent;border:1px solid #2a2a3a;padding:4px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:4px;">
+                                        <i data-lucide="download" style="width:12px;height:12px;"></i> Download
+                                    </button>
+                                </div>
+                            </div>
+                            <pre style="margin:0;background:#0f0f17;overflow-x:auto;"><code id="${codeId}" class="language-cpp" style="font-size:12px;line-height:1.6;font-family:'JetBrains Mono',monospace;">${escapeHtml(msg.code)}</code></pre>
+                        </div>` : ''}
+                    </div>
+                </div>`;
+            }
+            messagesContainer.appendChild(msgDiv);
+            if (isBot && msg.code) hljs.highlightElement(msgDiv.querySelector('code'));
+            lucide.createIcons();
+        }
+
+        function scrollToBottom() {
+            chatScrollArea.scrollTop = chatScrollArea.scrollHeight;
+        }
+
+        function copyToClipboard(codeId, btn) {
+            const el = document.getElementById(codeId);
+            if (!el) return;
+            navigator.clipboard.writeText(el.innerText).catch(() => {
+                const ta = document.createElement('textarea');
+                ta.value = el.innerText;
+                document.body.appendChild(ta); ta.select();
+                document.execCommand('copy'); document.body.removeChild(ta);
+            });
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<i data-lucide="check" style="width:12px;height:12px;"></i> Copied!';
+            btn.style.color = '#16a34a';
+            lucide.createIcons();
+            setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; lucide.createIcons(); }, 1500);
+        }
+
+        function downloadCode(title, codeId) {
+            const el = document.getElementById(codeId);
+            if (!el) return;
+            const blob = new Blob([el.innerText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = title.toLowerCase().replace(/[^a-z0-9]+/g, '_') + '.c';
+            document.body.appendChild(a); a.click();
+            document.body.removeChild(a); URL.revokeObjectURL(url);
+        }
+
+        promptTextarea.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+        });
+        promptTextarea.addEventListener('input', saveDraft);
+        // Flush the draft buffer on tab close / refresh / navigation.
+        // pagehide is the mobile-friendly counterpart to beforeunload.
+        window.addEventListener('beforeunload', saveDraft);
+        window.addEventListener('pagehide',    saveDraft);
+        document.getElementById('chatPromptTextarea').addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleChatSend(); }
+        });
+
+        window.addEventListener('DOMContentLoaded', initApp);
+    </script>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- FLOW FIELD PARTICLE BACKGROUND                                      -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <script>
+        (function () {
+            const canvas = document.getElementById('flow-field-canvas');
+            const ctx = canvas.getContext('2d');
+
+            const COLOR = '#818cf8';
+            const TRAIL_OPACITY = 0.08;
+            const PARTICLE_COUNT = 600;
+            const SPEED = 0.8;
+
+            let width, height, particles;
+            const mouse = { x: -1000, y: -1000 };
+
+            class Particle {
+                constructor() { this.reset(true); }
+
+                reset(random) {
+                    this.x = Math.random() * width;
+                    this.y = random ? Math.random() * height : (Math.random() < 0.5 ? -2 : height + 2);
+                    this.vx = 0;
+                    this.vy = 0;
+                    this.age = 0;
+                    this.life = Math.random() * 200 + 100;
+                }
+
+                update() {
+                    const angle = (Math.cos(this.x * 0.005) + Math.sin(this.y * 0.005)) * Math.PI;
+                    this.vx += Math.cos(angle) * 0.2 * SPEED;
+                    this.vy += Math.sin(angle) * 0.2 * SPEED;
+
+                    const dx = mouse.x - this.x;
+                    const dy = mouse.y - this.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < 150) {
+                        const force = (150 - dist) / 150;
+                        this.vx -= dx * force * 0.05;
+                        this.vy -= dy * force * 0.05;
+                    }
+
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.vx *= 0.95;
+                    this.vy *= 0.95;
+                    this.age++;
+
+                    if (this.age > this.life) this.reset(false);
+                    if (this.x < 0) this.x = width;
+                    if (this.x > width) this.x = 0;
+                    if (this.y < 0) this.y = height;
+                    if (this.y > height) this.y = 0;
+                }
+
+                draw() {
+                    const alpha = (1 - Math.abs((this.age / this.life) - 0.5) * 2) * 0.85;
+                    ctx.globalAlpha = alpha;
+                    ctx.fillStyle = COLOR;
+                    ctx.fillRect(this.x, this.y, 1.5, 1.5);
+                }
+            }
+
+            function init() {
+                const dpr = window.devicePixelRatio || 1;
+                width = window.innerWidth;
+                height = window.innerHeight;
+                canvas.width = width * dpr;
+                canvas.height = height * dpr;
+                canvas.style.width = width + 'px';
+                canvas.style.height = height + 'px';
+                ctx.scale(dpr, dpr);
+                particles = Array.from({ length: PARTICLE_COUNT }, () => new Particle());
+            }
+
+            function animate() {
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = `rgba(10, 10, 20, ${TRAIL_OPACITY})`;
+                ctx.fillRect(0, 0, width, height);
+                particles.forEach(p => { p.update(); p.draw(); });
+                requestAnimationFrame(animate);
+            }
+
+            window.addEventListener('resize', init);
+            window.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+            window.addEventListener('mouseleave', () => { mouse.x = -1000; mouse.y = -1000; });
+
+            init();
+            animate();
+        })();
+    </script>
+</body>
+
+</html>
