@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(curl -s -m 5 http://localhost:8000/health)",
-      "Bash(curl -s -m 5 http://localhost:8000/stats)"
-    ]
-  }
-}
