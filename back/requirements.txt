@@ -3,5 +3,5 @@ uvicorn[standard]==0.29.0
 pydantic==2.7.1
 python-dotenv==1.0.1
 rank-bm25==0.2.2
-google-generativeai==0.7.2
+google-genai==0.7.2
 supabase==2.6.0
