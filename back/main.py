@@ -1,13 +1,14 @@
 """
 NexBot Backend — Hybrid RAG for Optimized C/C++ Microcontroller Code Generation
 ================================================================================
-Improved Architecture v2:
+Improved Architecture v2 (Render-optimized — no torch/sentence-transformers):
   Persistence      : Supabase PostgreSQL — documents, embeddings, cache, history
-  Dense retrieval  : pgvector HNSW index via Supabase RPC (replaces FAISS)
+  Dense retrieval   : pgvector HNSW index via Supabase RPC (replaces FAISS)
   Sparse retrieval : BM25 (rank_bm25, in-memory) + PostgreSQL Full-Text Search
   Fusion           : 3-way Reciprocal Rank Fusion (RRF)
   Boosting         : Tag-overlap boost on fused scores
-  Generation       : Google Gemini (gemini-2.0-flash, free tier)
+  Embeddings       : Google Gemini text-embedding-004 (API-based, no local model)
+  Generation       : Google Gemini (gemini-2.5-flash, free tier)
   Caching          : MD5 query-hash → Supabase query_cache (TTL 24 h)
   Analytics        : query_history table with latency tracking
 
@@ -30,7 +31,6 @@ import re
 import hashlib
 import time
 import asyncio
-import numpy as np
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -38,7 +38,6 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from supabase import create_client
 import google.generativeai as genai
@@ -53,8 +52,8 @@ except ImportError:  # python-dotenv is optional if the user exports env vars
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DATASET_DIR   = Path(__file__).parent / "dataset"
-EMBED_MODEL   = "all-MiniLM-L6-v2"   # 384-dim, matches pgvector column
-EMBED_DIM     = 384
+EMBED_MODEL   = "models/text-embedding-004"  # Gemini embedding model
+EMBED_DIM     = 384   # matches pgvector column; Gemini supports output_dimensionality
 
 TOP_K_DENSE   = 8    # candidates from pgvector
 TOP_K_SPARSE  = 8    # candidates from BM25
@@ -69,8 +68,7 @@ CHUNK_OVERLAP   = 10        # overlapping lines between chunks
 GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
 SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-# Free-tier model — check AI Studio for the current alias. As of mid-2026
-# the 2.0-flash alias is gone; 2.5-flash is the current fast free model.
+# Free-tier model — check AI Studio for the current alias.
 GEMINI_MODEL         = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 SYSTEM_PROMPT = """You are NexBot, an expert embedded-systems firmware engineer specialising \
@@ -98,11 +96,11 @@ Respond ONLY with a valid JSON object (no markdown fences, no preamble) using th
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """
-    1. Pre-load embedding model.
+    1. Configure Gemini API.
     2. Load dataset files → upsert into Supabase (skips existing via on_conflict).
     3. Rebuild BM25 index from Supabase.
     """
-    _get_embed_model()   # warm up model
+    _configure_gemini()  # just sets API key, no model download
 
     docs = load_dataset()
     if docs:
@@ -110,11 +108,11 @@ async def _lifespan(app: FastAPI):
         print(f"[startup] Upserted {upserted} documents to Supabase.")
 
     rebuild_bm25_from_supabase()
-    print("[startup] NexBot v2 ready.")
+    print("[startup] NexBot v2 ready (lightweight mode — Gemini embeddings).")
     yield
 
 
-app = FastAPI(title="NexBot Hybrid RAG Backend", version="2.0.0", lifespan=_lifespan)
+app = FastAPI(title="NexBot Hybrid RAG Backend", version="2.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -125,7 +123,7 @@ app.add_middleware(
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 supabase_client:           Optional[object]      = None
-embed_model:              Optional[SentenceTransformer] = None
+_gemini_configured:        bool                  = False
 
 # In-memory BM25 (rebuilt from Supabase at startup / reload)
 _bm25_docs:          list[dict]       = []
@@ -169,6 +167,65 @@ def _extract_mcu_tags(query: str) -> list[str]:
     for pat in patterns:
         found.extend(re.findall(pat, query.lower()))
     return list(set(found))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemini Embeddings (replaces sentence-transformers — zero local model loading)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _configure_gemini():
+    """Configure the Gemini API key once. No model weights loaded into RAM."""
+    global _gemini_configured
+    if not _gemini_configured:
+        if not GEMINI_API_KEY:
+            raise HTTPException(
+                status_code=500,
+                detail="GEMINI_API_KEY environment variable is required.",
+            )
+        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_configured = True
+        print("[gemini] API configured (embedding + generation).")
+
+
+def _embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
+    """
+    Embed a list of texts using Gemini text-embedding-004.
+    Uses output_dimensionality=384 to match the existing pgvector column.
+
+    task_type should be:
+      - "RETRIEVAL_DOCUMENT" for indexing documents
+      - "RETRIEVAL_QUERY"    for encoding search queries
+    """
+    _configure_gemini()
+
+    embeddings = []
+    # Gemini embedding API supports batches of up to 100 texts
+    batch_size = 100
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        result = genai.embed_content(
+            model=EMBED_MODEL,
+            content=batch,
+            task_type=task_type,
+            output_dimensionality=EMBED_DIM,
+        )
+        # result["embedding"] is a list of lists when input is a list
+        if isinstance(result["embedding"][0], list):
+            embeddings.extend(result["embedding"])
+        else:
+            # Single text input returns a flat list
+            embeddings.append(result["embedding"])
+
+        if len(texts) > batch_size:
+            print(f"[embed] Encoded {min(i + batch_size, len(texts))}/{len(texts)} texts …")
+
+    return embeddings
+
+
+def _embed_query(query: str) -> list[float]:
+    """Embed a single query using the RETRIEVAL_QUERY task type."""
+    result = _embed_texts([query], task_type="RETRIEVAL_QUERY")
+    return result[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,12 +333,10 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
         return 0
 
     sb = get_supabase()
-    model = _get_embed_model()
 
-    print(f"[supabase] Encoding {len(docs)} documents …")
+    print(f"[supabase] Encoding {len(docs)} documents via Gemini embeddings …")
     texts      = [d["text"] for d in docs]
-    embeddings = model.encode(texts, show_progress_bar=True, normalize_embeddings=True)
-    embeddings = np.array(embeddings, dtype=np.float32)
+    embeddings = _embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
 
     rows = []
     for i, doc in enumerate(docs):
@@ -293,7 +348,7 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
             "text":        doc["text"],
             "source_file": doc.get("source_file", ""),
             "chunk_index": doc.get("chunk_index", 0),
-            "embedding":   embeddings[i].tolist(),
+            "embedding":   embeddings[i],
         })
 
     # Upsert in batches of 100 to avoid request-size limits
@@ -314,14 +369,6 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # BM25 in-memory index (seeded from Supabase)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _get_embed_model() -> SentenceTransformer:
-    global embed_model
-    if embed_model is None:
-        print("[model] Loading sentence-transformer …")
-        embed_model = SentenceTransformer(EMBED_MODEL)
-    return embed_model
-
 
 def rebuild_bm25_from_supabase():
     """Load all document texts from Supabase and rebuild the BM25 index."""
@@ -351,8 +398,7 @@ def _dense_retrieve(query: str) -> list[tuple[int, float]]:
     pgvector HNSW cosine similarity search via Supabase RPC.
     Returns list of (supabase_row_id, similarity).
     """
-    model   = _get_embed_model()
-    q_emb   = model.encode([query], normalize_embeddings=True)[0].tolist()
+    q_emb   = _embed_query(query)
     sb      = get_supabase()
     resp    = sb.rpc("match_documents", {
         "query_embedding": q_emb,
@@ -384,7 +430,7 @@ def _bm25_retrieve(query: str) -> list[tuple[int, float]]:
         return []
     tokens      = _tokenize(query)
     bm25_scores = _bm25_index.get_scores(tokens)
-    top_indices = np.argsort(bm25_scores)[::-1][:TOP_K_SPARSE]
+    top_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:TOP_K_SPARSE]
     return [
         (int(_bm25_docs[i]["id"]), float(bm25_scores[i]))
         for i in top_indices
@@ -467,12 +513,9 @@ def cache_lookup(query: str) -> Optional[dict]:
     try:
         resp = sb.table("query_cache").select("response").eq("query_hash", qhash).limit(1).execute()
         if resp.data:
-            # Atomic increment — avoids lost-update under concurrent requests.
             try:
                 sb.rpc("increment_cache_hit", {"qhash": qhash}).execute()
             except Exception:
-                # If the RPC isn't installed yet, fall back to a single SQL update
-                # that still increments atomically.
                 sb.table("query_cache").update({"last_accessed": "now()"}).eq("query_hash", qhash).execute()
             return resp.data[0]["response"]
     except Exception:
@@ -484,7 +527,6 @@ def cache_store(query: str, response: dict):
     qhash = _query_hash(query)
     sb    = get_supabase()
     try:
-        # last_accessed and created_at fall back to the column DEFAULTs.
         sb.table("query_cache").upsert({
             "query_hash": qhash,
             "query_text": query,
@@ -503,10 +545,6 @@ def log_query_history(
     top_k: int,
     session_id: Optional[str] = None,
 ):
-    """Persist one row to query_history. `response` is the full Gemini reply
-    dict (title / explanation / code / unit_tests / mcu_target); we keep the
-    full payload so the chat-history endpoint can replay the thread from
-    a single GET, with no reliance on the 24h query_cache."""
     sb = get_supabase()
     try:
         row = {
@@ -529,7 +567,7 @@ def log_query_history(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude generation
+# Gemini generation
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_context_block(retrieved: list[dict]) -> str:
@@ -551,22 +589,15 @@ def build_context_block(retrieved: list[dict]) -> str:
 
 
 def generate_with_gemini(query: str, context: str) -> dict:
-    if not GEMINI_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="GEMINI_API_KEY environment variable is not set. "
-                   "Get a free key at https://aistudio.google.com/app/apikey",
-        )
-
-    genai.configure(api_key=GEMINI_API_KEY)
+    _configure_gemini()
 
     model = genai.GenerativeModel(
         model_name=GEMINI_MODEL,
         system_instruction=SYSTEM_PROMPT,
         generation_config=genai.GenerationConfig(
-            temperature=0.2,        # low temp for deterministic code output
+            temperature=0.2,
             max_output_tokens=4096,
-            response_mime_type="application/json",  # native JSON mode — no fences needed
+            response_mime_type="application/json",
         ),
     )
 
@@ -576,7 +607,6 @@ def generate_with_gemini(query: str, context: str) -> dict:
         "Respond with ONLY a valid JSON object. No markdown fences, no extra text."
     )
 
-    # Retry up to 2 times on transient errors
     response = None
     for attempt in range(3):
         try:
@@ -589,7 +619,6 @@ def generate_with_gemini(query: str, context: str) -> dict:
 
     raw = response.text.strip() if response else ""
 
-    # Strip optional ```json fences as a safety net
     json_fence = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
     if json_fence:
         raw = json_fence.group(1)
@@ -636,19 +665,12 @@ class QueryResponse(BaseModel):
 
 
 class UpsertRequest(BaseModel):
-    documents: list[dict]  # list of {title, description, code, tags, source_file?, chunk_index?}
+    documents: list[dict]
 
 
 class DeleteResponse(BaseModel):
     deleted: bool
     id:      int
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Startup
-# ─────────────────────────────────────────────────────────────────────────────
-# (Startup logic lives in `_lifespan` above; FastAPI ≥ 0.93 deprecates
-# `@app.on_event("startup")` in favour of the lifespan context manager.)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -667,7 +689,7 @@ async def health():
         "bm25_docs":     len(_bm25_docs),
         "embed_model":   EMBED_MODEL,
         "gemini_model":  GEMINI_MODEL,
-        "version":       "2.0.0",
+        "version":       "2.1.0",
     }
 
 
@@ -785,8 +807,6 @@ async def stats():
     cache_resp   = sb.table("query_history").select("id", count="exact").eq("cache_hit", True).execute()
     cache_hits   = cache_resp.count if hasattr(cache_resp, "count") else 0
 
-    avg_resp     = sb.rpc("query_avg_latency", {}).execute() if False else None  # placeholder
-
     recent_resp  = sb.table("query_history").select(
         "query,response_title,cache_hit,latency_ms,created_at"
     ).order("created_at", desc=True).limit(10).execute()
@@ -814,12 +834,6 @@ async def clear_cache():
 
 @app.get("/history/sessions")
 async def list_chat_sessions(limit: int = 50):
-    """
-    Return recent chat sessions, newest activity first.
-
-    Each session bundles all query_history rows that share a session_id.
-    Old singleton rows (one query per session) appear as 1-message chats.
-    """
     sb = get_supabase()
     resp = sb.table("query_history").select(
         "id,query,response_title,cache_hit,latency_ms,created_at,session_id"
@@ -837,17 +851,16 @@ async def list_chat_sessions(limit: int = 50):
             "message_count": 0,
             "last_active":   r.get("created_at"),
             "preview":       "",
-            "queries":       [],   # ordered oldest → newest
+            "queries":       [],
         })
         s["message_count"] += 1
         s["queries"].append(r)
-        # rows arrive newest-first; first row seen is the most recent
         if not s["preview"]:
             s["preview"] = r.get("response_title") or r.get("query", "")
-        # title = oldest query in the session (last element after reverse)
+
     out = []
     for s in sessions.values():
-        s["queries"].reverse()  # now oldest → newest
+        s["queries"].reverse()
         oldest = s["queries"][0]
         title_src = (oldest.get("query") or "").strip()
         s["title"] = (title_src[:60] + "…") if len(title_src) > 60 else (title_src or "Untitled")
@@ -859,11 +872,6 @@ async def list_chat_sessions(limit: int = 50):
 
 @app.get("/history/sessions/{session_id}")
 async def get_chat_session(session_id: str):
-    """
-    Return one full session: all messages in chronological order.
-    Messages are returned as alternating user/bot pairs so the frontend
-    can replay the conversation directly.
-    """
     sb = get_supabase()
     resp = sb.table("query_history").select(
         "id,query,response_title,response_explanation,response_code,"
@@ -905,7 +913,6 @@ async def get_chat_session(session_id: str):
 
 @app.delete("/history/sessions/{session_id}")
 async def delete_chat_session(session_id: str):
-    """Permanently delete every row belonging to a chat session."""
     sb = get_supabase()
     resp = sb.table("query_history").delete().eq("session_id", session_id).execute()
     deleted = len(resp.data or [])
