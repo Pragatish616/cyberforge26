@@ -7,7 +7,7 @@ Improved Architecture v2 (Render-optimized — no torch/sentence-transformers):
   Sparse retrieval : BM25 (rank_bm25, in-memory) + PostgreSQL Full-Text Search
   Fusion           : 3-way Reciprocal Rank Fusion (RRF)
   Boosting         : Tag-overlap boost on fused scores
-  Embeddings       : Google Gemini text-embedding-004 (API-based, no local model)
+  Embeddings       : Google Gemini gemini-embedding-001 (API-based, no local model)
   Generation       : Google Gemini (gemini-2.5-flash, free tier)
   Caching          : MD5 query-hash → Supabase query_cache (TTL 24 h)
   Analytics        : query_history table with latency tracking
@@ -16,13 +16,6 @@ Environment variables required:
   GEMINI_API_KEY         — Google AI Studio free API key (aistudio.google.com)
   SUPABASE_URL           — e.g. https://xxxx.supabase.co
   SUPABASE_SERVICE_KEY   — service-role key (not anon key)
-
-Dataset format (place files in ./dataset/):
-  - JSON  : [{"title":"...", "description":"...", "code":"...", "tags":["uart","stm32",...]}]
-  - .c/.h : Raw source files chunked automatically with overlap
-
-SQL migrations required (run once via Supabase dashboard or CLI):
-  See supabase/migrations/ in your project — both migration files must be applied.
 """
 
 import os
@@ -30,7 +23,6 @@ import json
 import re
 import hashlib
 import time
-import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -40,35 +32,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 from supabase import create_client
-from google import genai as ggenai
+from google import genai
 from google.genai import types
-# Load .env from the project root (one level above this file) so we don't
-# require environment variables to be set by the shell.
+
+# Load .env from the project root (one level above this file)
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-except ImportError:  # python-dotenv is optional if the user exports env vars
+except ImportError:
     pass
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DATASET_DIR   = Path(__file__).parent / "dataset"
-EMBED_MODEL   = "models/text-embedding-001"  # Gemini embedding model
-EMBED_DIM     = 384   # matches pgvector column; Gemini supports output_dimensionality
+EMBED_MODEL   = "gemini-embedding-001"
+EMBED_DIM     = 384   # matches pgvector column
 
-TOP_K_DENSE   = 8    # candidates from pgvector
-TOP_K_SPARSE  = 8    # candidates from BM25
-TOP_K_FTS     = 8    # candidates from PostgreSQL FTS
-TOP_K_FINAL   = 5    # docs fed to Gemini after RRF + boosting
-RRF_K         = 60   # RRF constant (higher = less aggressive rank penalty)
+TOP_K_DENSE   = 8
+TOP_K_SPARSE  = 8
+TOP_K_FTS     = 8
+TOP_K_FINAL   = 5
+RRF_K         = 60
 
-CACHE_TTL_HOURS = 24        # query cache time-to-live
-CHUNK_SIZE      = 60        # lines per C/H chunk
-CHUNK_OVERLAP   = 10        # overlapping lines between chunks
+CACHE_TTL_HOURS = 24
+CHUNK_SIZE      = 60
+CHUNK_OVERLAP   = 10
 
 GEMINI_API_KEY       = os.getenv("GEMINI_API_KEY", "")
 SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-# Free-tier model — check AI Studio for the current alias.
 GEMINI_MODEL         = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 SYSTEM_PROMPT = """You are NexBot, an expert embedded-systems firmware engineer specialising \
@@ -95,12 +86,7 @@ Respond ONLY with a valid JSON object (no markdown fences, no preamble) using th
 # ── FastAPI app ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """
-    1. Configure Gemini API.
-    2. Load dataset files → upsert into Supabase (skips existing via on_conflict).
-    3. Rebuild BM25 index from Supabase.
-    """
-    _configure_gemini()  # just sets API key, no model download
+    _configure_gemini()
 
     docs = load_dataset()
     if docs:
@@ -123,9 +109,9 @@ app.add_middleware(
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 supabase_client:           Optional[object]      = None
+_gemini_client:            Optional[object]      = None
 _gemini_configured:        bool                  = False
 
-# In-memory BM25 (rebuilt from Supabase at startup / reload)
 _bm25_docs:          list[dict]       = []
 _bm25_index:         Optional[BM25Okapi] = None
 _bm25_tokenized:     list[list[str]]  = []
@@ -136,12 +122,10 @@ _bm25_tokenized:     list[list[str]]  = []
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase word tokeniser for BM25."""
     return re.findall(r"\w+", text.lower())
 
 
 def _doc_text(doc: dict) -> str:
-    """Flatten a document dict into a single retrieval string."""
     parts = [
         doc.get("title", ""),
         doc.get("description", ""),
@@ -158,7 +142,6 @@ def _query_hash(query: str) -> str:
 
 
 def _extract_mcu_tags(query: str) -> list[str]:
-    """Extract MCU-related keywords from the query to boost tag matching."""
     patterns = [
         r"\b(stm32\w*)\b", r"\b(esp32\w*)\b", r"\b(avr\w*|atmega\w*|attiny\w*)\b",
         r"\b(rp2040|pico)\b", r"\b(nrf\d+\w*)\b", r"\b(uart|spi|i2c|can|usb|adc|dac|pwm|dma|rtos|freertos)\b",
@@ -170,55 +153,40 @@ def _extract_mcu_tags(query: str) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini Embeddings (replaces sentence-transformers — zero local model loading)
+# Gemini client + embeddings
 # ─────────────────────────────────────────────────────────────────────────────
+
 def _configure_gemini():
     global _gemini_client, _gemini_configured
     if not _gemini_configured:
         if not GEMINI_API_KEY:
             raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is required.")
-        _gemini_client = ggenai.Client(api_key=GEMINI_API_KEY)
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
         _gemini_configured = True
         print("[gemini] API configured (embedding + generation).")
 
 
 def _embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
-    """
-    Embed a list of texts using Gemini text-embedding-004.
-    Uses output_dimensionality=384 to match the existing pgvector column.
-
-    task_type should be:
-      - "RETRIEVAL_DOCUMENT" for indexing documents
-      - "RETRIEVAL_QUERY"    for encoding search queries
-    """
     _configure_gemini()
-
     embeddings = []
-    # Gemini embedding API supports batches of up to 100 texts
     batch_size = 100
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        result = genai.embed_content(
+        result = _gemini_client.models.embed_content(
             model=EMBED_MODEL,
-            content=batch,
-            task_type=task_type,
-            output_dimensionality=EMBED_DIM,
+            contents=batch,
+            config=types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=EMBED_DIM,
+            ),
         )
-        # result["embedding"] is a list of lists when input is a list
-        if isinstance(result["embedding"][0], list):
-            embeddings.extend(result["embedding"])
-        else:
-            # Single text input returns a flat list
-            embeddings.append(result["embedding"])
-
+        embeddings.extend([e.values for e in result.embeddings])
         if len(texts) > batch_size:
             print(f"[embed] Encoded {min(i + batch_size, len(texts))}/{len(texts)} texts …")
-
     return embeddings
 
 
 def _embed_query(query: str) -> list[float]:
-    """Embed a single query using the RETRIEVAL_QUERY task type."""
     result = _embed_texts([query], task_type="RETRIEVAL_QUERY")
     return result[0]
 
@@ -250,12 +218,6 @@ def _load_json_file(path: Path) -> list[dict]:
 
 
 def _chunk_c_file(path: Path) -> list[dict]:
-    """
-    Split a .c/.h file into overlapping line-window chunks.
-    Uses a sliding window (CHUNK_SIZE lines, CHUNK_OVERLAP overlap) instead of
-    the original regex split, producing more consistent chunk sizes and better
-    context continuity across function boundaries.
-    """
     lines   = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     docs    = []
     step    = max(1, CHUNK_SIZE - CHUNK_OVERLAP)
@@ -306,7 +268,6 @@ def load_dataset() -> list[dict]:
         except Exception as e:
             print(f"[dataset] Failed to chunk {c_path.name}: {e}")
 
-    # Compute retrieval text for all docs
     for d in docs:
         d["text"] = _doc_text(d)
 
@@ -319,11 +280,6 @@ def load_dataset() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def upsert_documents_to_supabase(docs: list[dict]) -> int:
-    """
-    Encode documents and upsert into Supabase.
-    Deduplication key: (source_file, chunk_index).
-    Returns the number of rows upserted.
-    """
     if not docs:
         return 0
 
@@ -346,7 +302,6 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
             "embedding":   embeddings[i],
         })
 
-    # Upsert in batches of 100 to avoid request-size limits
     batch_size = 100
     total = 0
     for start in range(0, len(rows), batch_size):
@@ -366,7 +321,6 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def rebuild_bm25_from_supabase():
-    """Load all document texts from Supabase and rebuild the BM25 index."""
     global _bm25_docs, _bm25_index, _bm25_tokenized
 
     sb   = get_supabase()
@@ -389,10 +343,6 @@ def rebuild_bm25_from_supabase():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _dense_retrieve(query: str) -> list[tuple[int, float]]:
-    """
-    pgvector HNSW cosine similarity search via Supabase RPC.
-    Returns list of (supabase_row_id, similarity).
-    """
     q_emb   = _embed_query(query)
     sb      = get_supabase()
     resp    = sb.rpc("match_documents", {
@@ -404,10 +354,6 @@ def _dense_retrieve(query: str) -> list[tuple[int, float]]:
 
 
 def _fts_retrieve(query: str) -> list[tuple[int, float]]:
-    """
-    PostgreSQL full-text search via Supabase RPC.
-    Returns list of (supabase_row_id, ts_rank).
-    """
     sb   = get_supabase()
     resp = sb.rpc("fts_documents", {
         "query_text":  query,
@@ -417,10 +363,6 @@ def _fts_retrieve(query: str) -> list[tuple[int, float]]:
 
 
 def _bm25_retrieve(query: str) -> list[tuple[int, float]]:
-    """
-    In-memory BM25 search.
-    Returns list of (supabase_row_id, bm25_score).
-    """
     if _bm25_index is None or not _bm25_docs:
         return []
     tokens      = _tokenize(query)
@@ -437,7 +379,6 @@ def _rrf_fuse(
     ranked_lists: list[list[tuple[int, float]]],
     k: int = RRF_K,
 ) -> dict[int, float]:
-    """Reciprocal Rank Fusion across multiple ranked lists of (doc_id, score)."""
     scores: dict[int, float] = {}
     for ranked in ranked_lists:
         for rank, (doc_id, _) in enumerate(ranked):
@@ -451,7 +392,6 @@ def _tag_boost(
     query_tags:   list[str],
     boost:        float = 0.05,
 ) -> dict[int, float]:
-    """Add a small bonus for each matching tag between query and document."""
     if not query_tags:
         return fused_scores
     boosted = {}
@@ -464,13 +404,6 @@ def _tag_boost(
 
 
 def retrieve_hybrid(query: str, top_k_final: int = TOP_K_FINAL) -> list[dict]:
-    """
-    Three-way hybrid retrieval:
-      1. Dense   — pgvector HNSW (semantic)
-      2. Sparse  — BM25 in-memory (lexical)
-      3. FTS     — PostgreSQL full-text search (lexical + stemming)
-    Fused with RRF, then boosted by tag overlap.
-    """
     dense_results = _dense_retrieve(query)
     bm25_results  = _bm25_retrieve(query)
     fts_results   = _fts_retrieve(query)
@@ -480,7 +413,6 @@ def retrieve_hybrid(query: str, top_k_final: int = TOP_K_FINAL) -> list[dict]:
     if not fused:
         return []
 
-    # Fetch full doc data for all candidates from Supabase
     all_ids = list(fused.keys())
     sb      = get_supabase()
     resp    = sb.table("documents").select(
@@ -489,11 +421,9 @@ def retrieve_hybrid(query: str, top_k_final: int = TOP_K_FINAL) -> list[dict]:
 
     docs_by_id = {int(d["id"]): d for d in (resp.data or [])}
 
-    # Tag boost
     query_tags = _extract_mcu_tags(query)
     fused      = _tag_boost(fused, docs_by_id, query_tags)
 
-    # Sort and return top-k
     ranked_ids = sorted(fused.keys(), key=lambda x: fused[x], reverse=True)[:top_k_final]
     return [docs_by_id[doc_id] for doc_id in ranked_ids if doc_id in docs_by_id]
 
@@ -586,16 +516,6 @@ def build_context_block(retrieved: list[dict]) -> str:
 def generate_with_gemini(query: str, context: str) -> dict:
     _configure_gemini()
 
-    model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL,
-        system_instruction=SYSTEM_PROMPT,
-        generation_config=genai.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=4096,
-            response_mime_type="application/json",
-        ),
-    )
-
     user_message = (
         f"{context}\n\n---\n\n"
         f"**User Request:** {query}\n\n"
@@ -605,14 +525,23 @@ def generate_with_gemini(query: str, context: str) -> dict:
     response = None
     for attempt in range(3):
         try:
-            response = model.generate_content(user_message)
+            response = _gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=user_message,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_output_tokens=4096,
+                    response_mime_type="application/json",
+                ),
+            )
             break
         except Exception as e:
             if attempt == 2:
                 raise HTTPException(status_code=502, detail=f"Gemini API error: {e}")
             time.sleep(1.5 * (attempt + 1))
 
-    raw = response.text.strip() if response else ""
+    raw = response.text.strip() if response and response.text else ""
 
     json_fence = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
     if json_fence:
@@ -696,7 +625,6 @@ async def query_endpoint(req: QueryRequest, background_tasks: BackgroundTasks):
     t0        = time.monotonic()
     cache_hit = False
 
-    # 1. Cache lookup
     if req.use_cache:
         cached = cache_lookup(req.query)
         if cached:
@@ -713,24 +641,17 @@ async def query_endpoint(req: QueryRequest, background_tasks: BackgroundTasks):
                 **cached,
             )
 
-    # 2. Hybrid retrieval
     retrieved = retrieve_hybrid(req.query, top_k_final=req.top_k)
-
-    # 3. Build context
     context = build_context_block(retrieved)
-
-    # 4. Generate with Gemini
     result = generate_with_gemini(req.query, context)
 
     latency_ms = int((time.monotonic() - t0) * 1000)
 
-    # 5. Sources metadata
     sources = [
         {"id": d["id"], "title": d.get("title", ""), "tags": d.get("tags", [])}
         for d in retrieved
     ]
 
-    # 6. Cache store + history log (background, non-blocking)
     if req.use_cache:
         background_tasks.add_task(cache_store, req.query, result)
 
@@ -763,7 +684,6 @@ async def list_documents(limit: int = 50, offset: int = 0):
 
 @app.post("/documents/upsert")
 async def upsert_documents(req: UpsertRequest):
-    """Add or update documents via the API (no need for dataset files)."""
     docs = req.documents
     for d in docs:
         d["text"] = _doc_text(d)
@@ -784,7 +704,6 @@ async def delete_document(doc_id: int):
 
 @app.post("/reload")
 async def reload_dataset():
-    """Hot-reload dataset files and rebuild all indices."""
     docs     = load_dataset()
     upserted = upsert_documents_to_supabase(docs)
     rebuild_bm25_from_supabase()
@@ -793,7 +712,6 @@ async def reload_dataset():
 
 @app.get("/stats")
 async def stats():
-    """Query analytics from history table."""
     sb = get_supabase()
 
     total_resp   = sb.table("query_history").select("id", count="exact").execute()
@@ -816,7 +734,6 @@ async def stats():
 
 @app.delete("/cache")
 async def clear_cache():
-    """Clear the entire query cache."""
     sb      = get_supabase()
     resp    = sb.table("query_cache").delete().neq("id", 0).execute()
     cleared = len(resp.data) if resp.data else 0
