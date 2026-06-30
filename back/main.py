@@ -1,21 +1,7 @@
 """
 NexBot Backend — Hybrid RAG for Optimized C/C++ Microcontroller Code Generation
 ================================================================================
-Improved Architecture v2 (Render-optimized — no torch/sentence-transformers):
-  Persistence      : Supabase PostgreSQL — documents, embeddings, cache, history
-  Dense retrieval   : pgvector HNSW index via Supabase RPC (replaces FAISS)
-  Sparse retrieval : BM25 (rank_bm25, in-memory) + PostgreSQL Full-Text Search
-  Fusion           : 3-way Reciprocal Rank Fusion (RRF)
-  Boosting         : Tag-overlap boost on fused scores
-  Embeddings       : Google Gemini gemini-embedding-001 (API-based, no local model)
-  Generation       : Google Gemini (gemini-2.5-flash, free tier)
-  Caching          : MD5 query-hash → Supabase query_cache (TTL 24 h)
-  Analytics        : query_history table with latency tracking
-
-Environment variables required:
-  GEMINI_API_KEY         — Google AI Studio free API key (aistudio.google.com)
-  SUPABASE_URL           — e.g. https://xxxx.supabase.co
-  SUPABASE_SERVICE_KEY   — service-role key (not anon key)
+Render-optimized — no torch/sentence-transformers, Gemini API embeddings.
 """
 
 import os
@@ -35,7 +21,6 @@ from supabase import create_client
 from google import genai
 from google.genai import types
 
-# Load .env from the project root (one level above this file)
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -45,7 +30,7 @@ except ImportError:
 # ── Config ──────────────────────────────────────────────────────────────────
 DATASET_DIR   = Path(__file__).parent / "dataset"
 EMBED_MODEL   = "gemini-embedding-001"
-EMBED_DIM     = 384   # matches pgvector column
+EMBED_DIM     = 384
 
 TOP_K_DENSE   = 8
 TOP_K_SPARSE  = 8
@@ -71,13 +56,13 @@ When given a user query and retrieved context snippets, you MUST:
 3. Handle common pitfalls: volatile for ISR-shared variables, proper NVIC config, \
    DMA alignment, watchdog resets, and power-mode transitions.
 4. Add terse inline comments only where logic is non-obvious.
-5. After the code, output a "## Unit Tests" section with ≥3 Unity-framework or \
+5. After the code, output a "## Unit Tests" section with >=3 Unity-framework or \
    CppUTest stubs covering key functions.
-6. Keep explanations concise: 3–5 sentences before the code block.
+6. Keep explanations concise: 3-5 sentences before the code block.
 
 Respond ONLY with a valid JSON object (no markdown fences, no preamble) using these keys:
-  "title"       : short descriptive title (≤ 60 chars)
-  "explanation" : concise explanation string (3–5 sentences)
+  "title"       : short descriptive title (<= 60 chars)
+  "explanation" : concise explanation string (3-5 sentences)
   "code"        : complete firmware code string
   "unit_tests"  : unit-test code string
   "mcu_target"  : detected or inferred MCU family, e.g. "STM32F4", "ESP32", "Generic"
@@ -88,10 +73,18 @@ Respond ONLY with a valid JSON object (no markdown fences, no preamble) using th
 async def _lifespan(app: FastAPI):
     _configure_gemini()
 
-    docs = load_dataset()
-    if docs:
-        upserted = upsert_documents_to_supabase(docs)
-        print(f"[startup] Upserted {upserted} documents to Supabase.")
+    # Skip re-embedding if documents already exist in Supabase
+    sb = get_supabase()
+    existing = sb.table("documents").select("id", count="exact").execute()
+    existing_count = existing.count if hasattr(existing, "count") else len(existing.data or [])
+
+    if existing_count == 0:
+        docs = load_dataset()
+        if docs:
+            upserted = upsert_documents_to_supabase(docs)
+            print(f"[startup] Upserted {upserted} documents to Supabase.")
+    else:
+        print(f"[startup] {existing_count} documents already in Supabase — skipping re-embed.")
 
     rebuild_bm25_from_supabase()
     print("[startup] NexBot v2 ready (lightweight mode — Gemini embeddings).")
@@ -182,7 +175,8 @@ def _embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> lis
         )
         embeddings.extend([e.values for e in result.embeddings])
         if len(texts) > batch_size:
-            print(f"[embed] Encoded {min(i + batch_size, len(texts))}/{len(texts)} texts …")
+            print(f"[embed] Encoded {min(i + batch_size, len(texts))}/{len(texts)} texts ...")
+            time.sleep(62)  # wait 62s to stay under 100 req/min free tier limit
     return embeddings
 
 
@@ -230,7 +224,7 @@ def _chunk_c_file(path: Path) -> list[dict]:
         if len(chunk) >= 40:
             first_line = next((l.strip() for l in window if l.strip()), "")[:80]
             docs.append({
-                "title":       f"{path.name} — chunk {chunk_i + 1}",
+                "title":       f"{path.name} -- chunk {chunk_i + 1}",
                 "description": first_line,
                 "code":        chunk,
                 "tags":        [path.suffix.lstrip("."), path.stem.lower()],
@@ -285,7 +279,7 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
 
     sb = get_supabase()
 
-    print(f"[supabase] Encoding {len(docs)} documents via Gemini embeddings …")
+    print(f"[supabase] Encoding {len(docs)} documents via Gemini embeddings ...")
     texts      = [d["text"] for d in docs]
     embeddings = _embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
 
@@ -311,7 +305,7 @@ def upsert_documents_to_supabase(docs: list[dict]) -> int:
             on_conflict="source_file,chunk_index",
         ).execute()
         total += len(batch)
-        print(f"[supabase] Upserted {total}/{len(rows)} documents …")
+        print(f"[supabase] Upserted {total}/{len(rows)} documents ...")
 
     return total
 
@@ -330,7 +324,7 @@ def rebuild_bm25_from_supabase():
     if not _bm25_docs:
         _bm25_index     = None
         _bm25_tokenized = []
-        print("[bm25] No documents in Supabase — BM25 disabled.")
+        print("[bm25] No documents in Supabase -- BM25 disabled.")
         return
 
     _bm25_tokenized = [_tokenize(d["text"]) for d in _bm25_docs]
@@ -339,7 +333,7 @@ def rebuild_bm25_from_supabase():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Retrieval — three-way hybrid with RRF fusion
+# Retrieval -- three-way hybrid with RRF fusion
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _dense_retrieve(query: str) -> list[tuple[int, float]]:
@@ -505,7 +499,7 @@ def build_context_block(retrieved: list[dict]) -> str:
             parts.append(f"_{doc['description']}_")
         tags = doc.get("tags", [])
         if tags:
-            parts.append(f"Tags: `{'`, `'.join(tags)}`")
+            parts.append("Tags: " + ", ".join(tags))
         if doc.get("code"):
             code_preview = doc["code"][:1000]
             parts.append(f"```c\n{code_preview}\n```")
@@ -775,7 +769,7 @@ async def list_chat_sessions(limit: int = 50):
         s["queries"].reverse()
         oldest = s["queries"][0]
         title_src = (oldest.get("query") or "").strip()
-        s["title"] = (title_src[:60] + "…") if len(title_src) > 60 else (title_src or "Untitled")
+        s["title"] = (title_src[:60] + "...") if len(title_src) > 60 else (title_src or "Untitled")
         out.append(s)
 
     out.sort(key=lambda x: x["last_active"] or "", reverse=True)
@@ -816,7 +810,7 @@ async def get_chat_session(session_id: str):
 
     return {
         "session_id":    session_id,
-        "title":         (rows[0].get("query", "")[:60] + "…") if len(rows[0].get("query", "")) > 60 else rows[0].get("query", "Untitled"),
+        "title":         (rows[0].get("query", "")[:60] + "...") if len(rows[0].get("query", "")) > 60 else rows[0].get("query", "Untitled"),
         "message_count": len(rows),
         "last_active":   rows[-1].get("created_at"),
         "messages":      messages,
