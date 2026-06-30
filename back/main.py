@@ -40,8 +40,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 from supabase import create_client
-import google.generativeai as genai
-
+from google import genai as ggenai
+from google.genai import types
 # Load .env from the project root (one level above this file) so we don't
 # require environment variables to be set by the shell.
 try:
@@ -172,17 +172,12 @@ def _extract_mcu_tags(query: str) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini Embeddings (replaces sentence-transformers — zero local model loading)
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _configure_gemini():
-    """Configure the Gemini API key once. No model weights loaded into RAM."""
-    global _gemini_configured
+    global _gemini_client, _gemini_configured
     if not _gemini_configured:
         if not GEMINI_API_KEY:
-            raise HTTPException(
-                status_code=500,
-                detail="GEMINI_API_KEY environment variable is required.",
-            )
-        genai.configure(api_key=GEMINI_API_KEY)
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is required.")
+        _gemini_client = ggenai.Client(api_key=GEMINI_API_KEY)
         _gemini_configured = True
         print("[gemini] API configured (embedding + generation).")
 
